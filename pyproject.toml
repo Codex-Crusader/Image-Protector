@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-protector"
+version = "0.1.0"
+description = "Image perturbation and obfuscation tool with CLI and GUI"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name" }
+]
+dependencies = [
+  "numpy",
+  "pillow"
+]
+
+[project.optional-dependencies]
+full = [
+  "scipy"
+]
+
+[project.scripts]
+image-protector = "image_protector:main"
