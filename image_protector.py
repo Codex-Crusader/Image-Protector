@@ -5,7 +5,10 @@ Adds perturbations to images with comprehensive error handling and robustness.
 I..... Overbuilt this a bit.........
 
 Note: This adds visual noise patterns. Real adversarial protection requires
-access to target models and gradient-based optimization.
+access to target models and gradient-based optimization. 
+This code contains hardcoded parameters throughout (strength multipliers,
+frequencies, thresholds). These were empirically tuned for general use. For
+production use, consider extracting to a configuration system.
 
 P.S - If the comments are not giving you enough Information take a look at the docs
 P.P.S - Look, I spent too much time trying to avoid exception errors and edge cases,
@@ -1464,4 +1467,5 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
+
     # Dobby's FREEEEEEE!!!
