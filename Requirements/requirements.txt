@@ -1,0 +1,16 @@
+# Advanced Image Protector - Requirements
+# Python 3.8+
+
+# Core dependencies (required)
+numpy>=1.20.0
+Pillow>=9.0.0
+
+# Optional dependencies for enhanced functionality
+scipy>=1.7.0  # Required for frequency and texture methods
+
+# GUI dependencies (optional, for --gui mode)
+# tkinter is usually included with Python, but on some systems needs separate install:
+# Ubuntu/Debian: sudo apt-get install python3-tk
+# Fedora/RHEL: sudo dnf install python3-tkinter
+# macOS: included with Python
+# Windows: included with Python

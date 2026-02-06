@@ -1,0 +1,17 @@
+# Testing
+pytest
+
+# Code formatting
+black
+
+# Linting (style & common mistakes)
+ruff
+
+# Type checking (optional but nice)
+mypy
+
+# Packaging & build tools
+build
+twine
+setuptools
+wheel
