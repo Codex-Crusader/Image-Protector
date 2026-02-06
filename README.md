@@ -138,7 +138,7 @@ pip install -r requirements/dev-requirements.txt
 - **tkinter** - Required for GUI mode (usually included with Python)
 
 ### Development Dependencies
-Tools for contributors (see [`requirements/dev-requirements.txt`](requirements/dev-requirements.txt)):
+Tools for contributors (see [`requirements/dev-requirements.txt`](Requirements/dev-requirements.txt)):
 - `black` - Code formatting
 - `ruff` - Linting
 - `mypy` - Type checking
@@ -296,9 +296,9 @@ Batch operations create a comprehensive `batch_summary.json`.
 ### Protection Methods (Technical Details)
 
 For in-depth mathematical explanations, see:
-- 📐 [Mathematical Details](docs/math.md)
-- 📝 [Acronyms & Terms](docs/acronym.md)
-- 🔄 [Data Flow Diagrams](docs/variable_flow.md)
+- 📐 [Mathematical Details](/Docs/Math.md)
+- 📝 [Acronyms & Terms](Docs/acronym.md)
+- 🔄 [Data Flow Diagrams](Docs/variable_flow.md)
 
 #### 🎼 Frequency Method
 Uses Discrete Cosine Transform (DCT) to add noise in the frequency domain:
@@ -637,4 +637,5 @@ If you use this tool in research, publications, or commercial products, please c
 
 
 </div>
+
 
