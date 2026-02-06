@@ -3,12 +3,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Author's Regret Level](https://img.shields.io/badge/regret-moderate-orange.svg)](README.md)
 
 **Protect your images from unauthorized AI training and automated scraping.**
 
-Don't like AI greasing their grubby hands over your images? Want to make it harder for bots, scrapers, or basic ML models to analyze or steal your images, while keeping them visually usable for humans? **Image Protector** applies controlled perturbations to make your images harder to scrape, analyze, or use for automated processing—while remaining perfectly viewable.
+Don't like AI greasing their grubby hands over your images? Want to make it harder for bots, scrapers, or basic ML models to analyze or steal your images, while keeping them visually usable for humans? **Image Protector** applies controlled perturbations to make your images harder to scrape, analyze, or use for automated processing-while remaining perfectly viewable.
 
 > 🎯 **Perfect for:** Artists, photographers, content creators, and anyone who wants to protect their visual work from unauthorized use.
+
+**Note:** I over-engineered this weekend project into 2K lines of code.
+It adds noise to images. That's it. But the code quality is solid!
 
 ---
 
@@ -363,7 +367,7 @@ Approximate processing times on a modern laptop (Intel i7, 16GB RAM):
 
 ## ❓ FAQ
 
-### Will this stop AI from training on my images?
+### Q. Will this stop AI from training on my images?
 
 This tool adds perturbations that make images **harder** to use for training, acting as a **deterrent** rather than a guarantee. It's designed to:
 - ✅ Break naive scrapers and automated tools
@@ -374,7 +378,7 @@ This tool adds perturbations that make images **harder** to use for training, ac
 
 Think of it like a bike lock: it won't stop a professional thief with power tools, but it will deter opportunistic theft.
 
-### What's the difference between protection methods?
+### Q. What's the difference between protection methods?
 
 **Quick Comparison:**
 
@@ -391,7 +395,7 @@ Think of it like a bike lock: it won't stop a professional thief with power tool
 - Photography → `frequency` (subtle, professional)
 - Quick protection → `gradient` (balanced)
 
-### Will people notice the changes?
+### Q. Will people notice the changes?
 
 **At default strength (1.0):**
 - Changes are **barely visible** to most viewers
@@ -405,14 +409,18 @@ Think of it like a bike lock: it won't stop a professional thief with power tool
 
 **Pro tip:** Start at 1.0, increase gradually. Use GUI to compare results visually.
 
+### Q. Why build this?
 
-### Why do some methods require SciPy?
+Honestly? Started as a weekend experiment. Got carried away. 
+I regret nothing (maybe a little). But it works great!
+
+### Q. Why do some methods require SciPy?
 
 The `frequency` method uses **Discrete Cosine Transform (DCT)** - the same math behind JPEG compression. The `texture` method uses advanced **convolution operations** for local variance analysis. These require SciPy's signal processing library.
 
 **Good news:** The tool gracefully degrades without SciPy. Ensemble mode will just skip frequency/texture methods if SciPy isn't installed.
 
-### How does this compare to Fawkes/Nightshade?
+### Q. How does this compare to Fawkes/Nightshade?
 
 **Similarities:**
 - Both add perturbations to protect images
@@ -633,9 +641,8 @@ If you use this tool in research, publications, or commercial products, please c
 
 **Made with ❤️ by [Bhargavaram Krishnapur](https://github.com/Codex-Crusader)**
 
-*Protect your creativity. Protect your work.*
+Clankers need to learn about copyright infringement.
+(Yes, before you ask, Ma Boy ChatGPT gave me permission to say that.)
 
 
 </div>
-
-
