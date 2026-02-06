@@ -17,10 +17,11 @@ Don't like AI greasing their grubby hands over your images? Want to make it hard
 ### 🖥️ Just Want to Use It? (No Installation Required)
 
 **Windows Users:**
-1. Download [AdvancedImageProtector.exe](https://github.com/Codex-Crusader/image-protector/raw/main/dist/AdvancedImageProtector.exe) (GUI version)
-2. Double-click to launch
-3. Select your image and click "Protect Image"
-4. Done! 🎉
+1. Download [AdvancedImageProtector.exe](https://github.com/Codex-Crusader/Image-Protector/releases) (GUI version and command line version)
+2. Select GUI version to use it as an APP and Command line version if you wish to use from the terminal.
+3. Double-click to launch
+4. Select your image and click "Protect Image"
+5. Done! 🎉
 
 **Command Line Users:**
 ```bash
@@ -528,10 +529,6 @@ image-protector/
 │   ├── math.md                     # Mathematical method details
 │   ├── acronym.md                  # Glossary of terms
 │   └── variable_flow.md            # Data flow documentation
-├── dist/                           # Built executables
-│   ├── AdvancedImageProtector.exe          # Windows GUI executable
-│   └── AdvancedImageProtector-CLI.exe      # Windows CLI executable
-├── tests/                          # Unit tests (future)
 ├── .gitignore                      # Git ignore patterns
 ├── LICENSE                         # MIT License
 └── README.md                       # This file
@@ -637,5 +634,6 @@ If you use this tool in research, publications, or commercial products, please c
 **Made with ❤️ by [Bhargavaram Krishnapur](https://github.com/Codex-Crusader)**
 
 *Protect your creativity. Protect your work.*
+
 
 </div>
