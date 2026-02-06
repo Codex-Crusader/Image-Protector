@@ -83,7 +83,7 @@ python image_protector.py input.jpg -o protected.jpg
 AdvancedImageProtector.exe - GUI version
 AdvancedImageProtector-CLI.exe - Command-line version
 
-Download directly from the [dist/](dist/) folder.
+Download directly from [here](https://github.com/Codex-Crusader/Image-Protector/releases).
 
 > ⚠️ **Note:** Some antivirus software may flag PyInstaller executables as potentially unwanted. This is a common false positive. You can verify the source code in this repository.
 
@@ -637,3 +637,4 @@ If you use this tool in research, publications, or commercial products, please c
 
 
 </div>
+
