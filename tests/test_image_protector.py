@@ -338,3 +338,22 @@ def test_console_output_is_ascii_only():
                 if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
                     offenders += [(node.lineno, ch) for ch in piece.value if ord(ch) > 127]
     assert not offenders, f"non-ASCII in print(): {offenders}"
+
+
+# ------------------------------------------------------------ gui decoration
+
+def test_watermark_asset_decodes():
+    """The mascot is embedded as base64 so PyInstaller --onefile builds keep it."""
+    import base64
+    import io
+
+    from PIL import Image as PILImage
+
+    from image_protector import _WATERMARK_PNG_B64, WATERMARK_GUTTER, WATERMARK_OPACITY
+
+    art = PILImage.open(io.BytesIO(base64.b64decode(_WATERMARK_PNG_B64)))
+    assert art.mode == 'RGBA', "alpha is needed to composite against the theme colour"
+    assert art.size == (96, 88)
+    assert 0.0 < WATERMARK_OPACITY <= 1.0
+    # The log reserves this gutter; if the art outgrows it, text gets covered.
+    assert art.width < WATERMARK_GUTTER

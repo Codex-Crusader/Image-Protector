@@ -176,10 +176,47 @@ python image_protector.py --gui
 **GUI Features:**
 - 📁 File browser for easy image selection
 - 🎚️ Visual strength slider with live preview
-- 📊 Real-time progress tracking
+- 🎯 Assumed-downscale selector, so you can aim the perturbation at the ingest size you expect
+- 📊 Real-time progress tracking, with estimated downscale survival per image
 - 📝 Detailed status logging
 - ⏸️ Cancellable batch operations
 - 🎨 Method selection with availability indicators
+- 🗿 A faded mascot keeping watch from the bottom-left corner
+
+The window now sizes itself to its own layout instead of opening at a fixed
+900x700. It previously opened smaller than the content required, which squeezed
+the Status Log down to a single pixel: the app was writing progress that nobody
+could read.
+
+<details>
+<summary><b>Tuning or removing the corner mascot</b></summary>
+
+The artwork is embedded in `image_protector.py` as base64 (`_WATERMARK_PNG_B64`,
+96x88, quantised to 64 colours). It is embedded rather than shipped as a loose
+file because the Windows releases are built with PyInstaller `--onefile`, where
+an external asset would need `--add-data` plumbing and a `sys._MEIPASS` lookup
+to survive the bundle.
+
+Two constants control it:
+
+| Constant | Default | Effect |
+|---|---|---|
+| `WATERMARK_OPACITY` | `0.30` | How faded it is, 0.0 to 1.0 |
+| `WATERMARK_GUTTER` | `104` | Left padding reserved in the Status Log so the mascot never covers text |
+
+Tk widgets are opaque, so "semi-transparent" means the artwork is
+alpha-composited against the theme's background colour before it reaches Tk,
+rather than being genuinely see-through. That colour is resolved at runtime
+(on Windows it is a system name like `SystemButtonFace`), so it blends under
+whatever theme is active. Because the label would otherwise sit on top of the
+log and hide the left edge of each line, `WATERMARK_GUTTER` reserves matching
+space; if you enlarge the art, raise the gutter to match.
+
+To remove it entirely, delete the `_create_watermark()` call in
+`ProtectorGUI.__init__`. Nothing else depends on it, and the method already
+swallows its own failures so a missing `PIL.ImageTk` never stops the GUI
+opening.
+</details>
 
 ---
 
@@ -708,6 +745,12 @@ This project was inspired by and builds upon the pioneering work of:
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
 
 **TL;DR:** You can use this commercially, modify it, distribute it, and use it privately. Just include the license notice.
+
+> **One exception:** the GUI's corner mascot is a third-party character, not
+> original work, so the MIT grant above does not cover that asset. It is
+> decoration only and nothing depends on it; see the mascot note under
+> [GUI Mode](#gui-mode) for how to remove it if you would rather ship the
+> project with a clean licence story.
 
 ---
 

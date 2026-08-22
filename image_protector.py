@@ -40,8 +40,10 @@ License: MIT
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import sys
@@ -100,6 +102,129 @@ else:
         tk = ttk = filedialog = messagebox = threading = queue = None
         TKINTER_AVAILABLE = False
         logger.warning("tkinter not available - GUI mode disabled")
+
+
+# GUI DECORATION
+
+# Opacity for the corner mascot, 0.0 to 1.0. It is composited against the theme
+# background at build time rather than rendered with real transparency, since Tk
+# widgets are opaque; see ProtectorGUI._create_watermark.
+WATERMARK_OPACITY = 0.30
+
+# Horizontal space reserved at the bottom-left so the mascot never covers text.
+WATERMARK_GUTTER = 104
+
+# Embedded rather than shipped as a file on purpose: the Windows releases are
+# built with PyInstaller --onefile, and a loose asset would need --add-data
+# plumbing and a sys._MEIPASS lookup to survive that. 96x88, quantised to 64
+# colours, which is visually identical at this size and roughly halves the size.
+_WATERMARK_PNG_B64 = (
+    "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"
+)
 
 
 # CONFIGURATION & DATA CLASSES
@@ -1060,8 +1185,7 @@ if TKINTER_AVAILABLE:
 
             self.root = tk.Tk()
             self.root.title("Image Protector v2.2")
-            self.root.geometry("900x700")
-            self.root.minsize(800, 600)
+            self.root.minsize(820, 640)
 
             self.config = ProtectionConfig()
             self.processor: ImageProcessor | None = None
@@ -1221,9 +1345,13 @@ if TKINTER_AVAILABLE:
 
             # Create text with scrollbar for log display
             log_scroll_frame = ttk.Frame(log_frame)
-            log_scroll_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            # Left gutter reserves room for the corner mascot. A Tk label is
+            # opaque, so without this the watermark would hide the left edge of
+            # the log lines rather than sitting behind them.
+            log_scroll_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S),
+                                  padx=(WATERMARK_GUTTER, 0))
 
-            self.log_text = tk.Text(log_scroll_frame, height=12, width=80, wrap=tk.WORD)
+            self.log_text = tk.Text(log_scroll_frame, height=6, width=80, wrap=tk.WORD)
             scrollbar = ttk.Scrollbar(log_scroll_frame, orient=tk.VERTICAL, command=self.log_text.yview)
             self.log_text.configure(yscrollcommand=scrollbar.set)
 
@@ -1244,6 +1372,59 @@ if TKINTER_AVAILABLE:
 
             # Bind close event to handle cleanup if needed
             self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+            # Size the window to what the layout actually needs. It was fixed at
+            # 900x700 against a requirement of ~900, which compressed the status
+            # log to a single pixel: the app wrote progress nobody could read.
+            self.root.update_idletasks()
+            width = max(900, self.root.winfo_reqwidth() + 20)
+            height = self.root.winfo_reqheight() + 20
+            screen_h = self.root.winfo_screenheight()
+            self.root.geometry(f"{width}x{min(height, screen_h - 80)}")
+
+            self._create_watermark()
+
+        def _create_watermark(self) -> None:
+            """
+            Pin the faded mascot to the window's bottom-left corner.
+
+            Uses place() against the root rather than a grid row on purpose: the
+            grid content is taller than the default window, so anything gridded
+            below the log is clipped and would never be seen. place() anchors to
+            the actual window corner, so it stays put at any size.
+
+            Tk widgets are not see-through, so "semi-transparent" here means the
+            artwork is alpha-composited against the theme's own background
+            colour before it ever reaches Tk. That colour is resolved at runtime
+            (on Windows it is a system name like SystemButtonFace), so it blends
+            under whatever theme is active instead of against a hardcoded grey.
+
+            Entirely decorative: any failure is swallowed, because an easter egg
+            must never be the reason the GUI fails to open.
+            """
+            try:
+                from PIL import ImageTk
+
+                art = Image.open(io.BytesIO(base64.b64decode(_WATERMARK_PNG_B64))).convert("RGBA")
+
+                # winfo_rgb resolves any Tk colour name to 16-bit channels.
+                colour = ttk.Style().lookup('TFrame', 'background') or self.root.cget('bg')
+                background = tuple(v >> 8 for v in self.root.winfo_rgb(colour))
+
+                faded = art.copy()
+                faded.putalpha(art.getchannel("A").point(lambda v: int(v * WATERMARK_OPACITY)))
+                flattened = Image.new("RGB", art.size, background)
+                flattened.paste(faded, (0, 0), faded)
+
+                # Tk drops images that are only referenced locally, so this has
+                # to stay alive on the instance.
+                self._watermark_image = ImageTk.PhotoImage(flattened)
+                label = tk.Label(self.root, image=self._watermark_image, borderwidth=0,
+                                 background=colour)
+                label.place(relx=0.0, rely=1.0, anchor=tk.SW, x=8, y=-8)
+                label.lift()  # place() siblings draw under gridded widgets otherwise
+            except Exception as exc:  # noqa: BLE001 - decoration must never break startup
+                logger.debug("Watermark not shown: %s", exc)
 
         def _start_queue_processor(self) -> None:
             """Process GUI updates from queue (thread-safe)"""
