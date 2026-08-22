@@ -1,6 +1,6 @@
-# 🛡️ Image Protector
+# Image Protector
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Author's Regret Level](https://img.shields.io/badge/regret-moderate-orange.svg)](README.md)
@@ -9,23 +9,23 @@
 
 Don't like AI greasing their grubby hands over your images? Want to make it harder for bots, scrapers, or basic ML models to analyze or steal your images, while keeping them visually usable for humans? **Image Protector** applies controlled perturbations to make your images harder to scrape, analyze, or use for automated processing-while remaining perfectly viewable.
 
-> 🎯 **Perfect for:** Artists, photographers, content creators, and anyone who wants to protect their visual work from unauthorized use.
+> **Perfect for:** Artists, photographers, content creators, and anyone who wants to protect their visual work from unauthorized use.
 
 **Note:** I over-engineered this weekend project into 2K lines of code.
 It adds noise to images. That's it. But the code quality is solid!
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
-### 🖥️ Just Want to Use It? (No Installation Required)
+### Just Want to Use It? (No Installation Required)
 
 **Windows Users:**
 1. Download [AdvancedImageProtector.exe](https://github.com/Codex-Crusader/Image-Protector/releases) (GUI version and command line version)
 2. Select GUI version to use it as an APP and Command line version if you wish to use from the terminal.
 3. Double-click to launch
 4. Select your image and click "Protect Image"
-5. Done! 🎉
+5. Done!
 
 **Command Line Users:**
 ```bash
@@ -36,7 +36,7 @@ wget https://github.com/Codex-Crusader/image-protector/raw/main/dist/AdvancedIma
 AdvancedImageProtector-CLI.exe input.jpg -o protected.jpg
 ```
 
-### 🐍 Want to Run from Source?
+### Want to Run from Source?
 
 ```bash
 # Clone and install
@@ -53,9 +53,9 @@ python image_protector.py input.jpg -o protected.jpg
 
 ---
 
-## ✨ Features
+## Features
 
-### 🎨 Multiple Protection Methods
+### Multiple Protection Methods
 - **Ensemble** - Weighted blend of the components below (default)
 - **Frequency** - band-pass perturbation in the frequency domain
 - **Gradient** - Structured sinusoidal pattern, edge-weighted
@@ -73,25 +73,25 @@ python image_protector.py input.jpg -o protected.jpg
 > perturbation respectively. A real gradient attack is planned behind an
 > optional torch extra.
 
-### 🛠️ Powerful Capabilities
-- ✅ **Batch processing** - Protect entire folders at once
-- ✅ **Ingest-aware targeting** - aims perturbation at the detail that survives a scraper's downscale
-- ✅ **Adjustable strength** - a quality budget in dB, 6 dB per doubling, identical across methods
-- ✅ **Perceptual masking** - hides perturbation in busy regions where the eye is least sensitive (measured: +0.018 SSIM at matched PSNR)
-- ✅ **Custom method weights** - Fine-tune ensemble combinations
-- ✅ **Metadata signatures** - Optional invisible watermarking
-- ✅ **Detailed metrics** - PSNR, MSE, and estimated survival of a downscale
-- ✅ **Reproducible** - `--seed` for identical output across runs
-- ✅ **Progress tracking** - Real-time status for batch operations
-- ✅ **Cross-platform** - Windows, Linux, macOS
+### Powerful Capabilities
+- **Batch processing** - Protect entire folders at once
+- **Ingest-aware targeting** - aims perturbation at the detail that survives a scraper's downscale
+- **Adjustable strength** - a quality budget in dB, 6 dB per doubling, identical across methods
+- **Perceptual masking** - hides perturbation in busy regions where the eye is least sensitive (measured: +0.018 SSIM at matched PSNR)
+- **Custom method weights** - Fine-tune ensemble combinations
+- **Metadata signatures** - Optional invisible watermarking
+- **Detailed metrics** - PSNR, MSE, and estimated survival of a downscale
+- **Reproducible** - `--seed` for identical output across runs
+- **Progress tracking** - Real-time status for batch operations
+- **Cross-platform** - Windows, Linux, macOS
 
-### 🖥️ Two Interfaces
+### Two Interfaces
 - **GUI Mode** - User-friendly graphical interface (no terminal required)
 - **CLI Mode** - Perfect for automation, scripts, and batch jobs
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Option 1: Download Executable (Windows)
 
@@ -102,7 +102,7 @@ AdvancedImageProtector-CLI.exe - Command-line version
 
 Download directly from [here](https://github.com/Codex-Crusader/Image-Protector/releases).
 
-> ⚠️ **Note:** Some antivirus software may flag PyInstaller executables as potentially unwanted. This is a common false positive. You can verify the source code in this repository.
+> **Note:** Some antivirus software may flag PyInstaller executables as potentially unwanted. This is a common false positive. You can verify the source code in this repository.
 
 ### Option 2: Install from Source
 
@@ -143,7 +143,7 @@ pip install -r Requirements/dev-requirements.txt
 
 ---
 
-## 🧰 Dependencies
+## Dependencies
 
 ### Core Dependencies
 - **Python 3.8+** - Required
@@ -164,7 +164,7 @@ Tools for contributors (see [`Requirements/dev-requirements.txt`](Requirements/d
 
 ---
 
-## 🚀 Usage
+## Usage
 
 ### GUI Mode
 
@@ -174,14 +174,14 @@ python image_protector.py --gui
 ```
 
 **GUI Features:**
-- 📁 File browser for easy image selection
-- 🎚️ Visual strength slider with live preview
-- 🎯 Assumed-downscale selector, so you can aim the perturbation at the ingest size you expect
-- 📊 Real-time progress tracking, with estimated downscale survival per image
-- 📝 Detailed status logging
-- ⏸️ Cancellable batch operations
-- 🎨 Method selection with availability indicators
-- 🗿 A faded mascot keeping watch from the bottom-left corner
+- File browser for easy image selection
+- Visual strength slider with live preview
+- Assumed-downscale selector, so you can aim the perturbation at the ingest size you expect
+- Real-time progress tracking, with estimated downscale survival per image
+- Detailed status logging
+- Cancellable batch operations
+- Method selection with availability indicators
+- A faded mascot keeping watch from the bottom-left corner
 
 The window now sizes itself to its own layout instead of opening at a fixed
 900x700. It previously opened smaller than the content required, which squeezed
@@ -272,7 +272,7 @@ python image_protector.py input.jpg -o output.jpg -v
 
 ---
 
-## ⚙️ Configuration Options
+## Configuration Options
 
 ### CLI Arguments
 
@@ -312,7 +312,7 @@ doubling, so `2.0` is exactly twice the perturbation of `1.0`, and it means the
 same thing for every method. That is what stops the ensemble from being weaker
 than its own components.
 
-> ⚠️ **Behaviour change from v2.1:** because `--strength` is now a budget rather
+> **Behaviour change from v2.1:** because `--strength` is now a budget rather
 > than a per-method multiplier, the same number produces a different result. The
 > v2.1 ensemble at `-s 1.0` gave a perturbation std of ~3.40 (PSNR 37.5); v2.2
 > gives ~4.49 (PSNR 35.1), so roughly 32% more perturbation. If you were happy
@@ -342,7 +342,7 @@ twice over. The flag remains for experimentation; it is not a recommendation.
 
 ---
 
-## 📏 Measured Results
+## Measured Results
 
 Measured on five real photographs, ensemble at `--strength 1.0`, matched 35 dB
 quality budget. "Survival" is the share of perturbation reaching a model through
@@ -382,7 +382,7 @@ never as "fools the model".
 
 ---
 
-## 📊 Output
+## Output
 
 ### Protected Images
 The tool saves protected versions of your images with configurable quality settings:
@@ -413,7 +413,7 @@ Batch operations create a comprehensive `batch_summary.json`.
 
 ---
 
-## 🧠 How It Works
+## How It Works
 
 ### High-Level Overview
 
@@ -425,11 +425,11 @@ Batch operations create a comprehensive `batch_summary.json`.
 ### Protection Methods (Technical Details)
 
 For in-depth mathematical explanations, see:
-- 📐 [Mathematical Details](/Docs/Math.md)
-- 📝 [Acronyms & Terms](Docs/acronym.md)
-- 🔄 [Data Flow Diagrams](Docs/variable_flow.md)
+- [Mathematical Details](/Docs/Math.md)
+- [Acronyms & Terms](Docs/acronym.md)
+- [Data Flow Diagrams](Docs/variable_flow.md)
 
-#### 🎼 Frequency Method
+#### Frequency Method
 A radial band-pass built with a global FFT:
 - Targets the frequency band that **survives** the assumed downscale, rather
   than the top of the spectrum
@@ -441,26 +441,26 @@ A radial band-pass built with a global FFT:
   FFT has no block grid to leave seams at.
 - No longer needs SciPy
 
-#### 🌊 Gradient Method
+#### Gradient Method
 A structured sinusoidal interference pattern. **No model gradient is computed:**
 - Pattern frequency scales with the assumed downscale so it survives resampling
 - Edge-weighted, so it rides on existing detail
 - Historically named after FGSM; the mechanism is not FGSM
 
-#### 🧩 Texture Method
+#### Texture Method
 Value noise (bicubic-upsampled white noise) adapted to image content:
 - Feature size tracks the assumed downscale
 - Weighted by local variance, so textured regions carry more
 - Previously the blob scale was large enough that its energy sat almost
   entirely near DC, which survives a resize but reads as a slow colour cast
 
-#### 🎲 Noise Method
+#### Noise Method
 Content-adaptive noise, low-pass filtered:
 - Blurred to the smallest feature the assumed downscale can carry, because
   white noise is over 88% destroyed by a resize to 224px
 - Scaled by local variance
 
-#### 🔄 Adversarial Method
+#### Adversarial Method
 Iterative bounded perturbation. **Not a PGD attack:**
 - 7 accumulating steps with decaying size, projected into an epsilon ball
 - Uses a spatially correlated walk, which survives resampling better than the
@@ -468,7 +468,7 @@ Iterative bounded perturbation. **Not a PGD attack:**
 - Without a model to differentiate, the old seven-step version was
   statistically equivalent to a single draw of bounded noise
 
-#### 🎭 Ensemble Method
+#### Ensemble Method
 Weighted combination of all methods:
 - Configurable weights for each technique
 - Default weights optimized for balance
@@ -476,7 +476,7 @@ Weighted combination of all methods:
 
 ---
 
-## ⚡ Performance
+## Performance
 
 Approximate processing times on a modern laptop (Intel i7, 16GB RAM):
 
@@ -499,16 +499,20 @@ Approximate processing times on a modern laptop (Intel i7, 16GB RAM):
 
 ---
 
-## ❓ FAQ
+## FAQ
 
 ### Q. Will this stop AI from training on my images?
 
-This tool adds perturbations that make images **harder** to use for training, acting as a **deterrent** rather than a guarantee. It's designed to:
-- ✅ Break naive scrapers and automated tools
-- ✅ Disrupt basic ML pipelines
-- ✅ Add computational cost to dataset collection
-- ❌ NOT provide cryptographic-level protection
-- ❌ NOT guarantee defense against determined adversaries with resources
+This tool adds perturbations that make images **harder** to use for training, acting as a **deterrent** rather than a guarantee.
+
+It is designed to:
+- Break naive scrapers and automated tools
+- Disrupt basic ML pipelines
+- Add computational cost to dataset collection
+
+It will not:
+- Provide cryptographic-level protection
+- Guarantee defense against determined adversaries with resources
 
 Think of it like a bike lock: it won't stop a professional thief with power tools, but it will deter opportunistic theft.
 
@@ -580,14 +584,14 @@ However, some metadata may be lost during processing. If preserving all metadata
 
 ---
 
-## ⚠️ Limitations
+## Limitations
 
 **Technical Limitations:**
-- ❌ **Not cryptographically secure** - This is obfuscation, not encryption
-- ❌ **Not model-specific** - Doesn't target particular ML architectures
-- ❌ **Reversible with effort** - Determined attackers with resources can denoise
-- ❌ **No gradient access** - Can't compute true adversarial perturbations without a target model
-- ❌ **Not validated against a model** - the tool measures how much perturbation
+- **Not cryptographically secure** - This is obfuscation, not encryption
+- **Not model-specific** - Doesn't target particular ML architectures
+- **Reversible with effort** - Determined attackers with resources can denoise
+- **No gradient access** - Can't compute true adversarial perturbations without a target model
+- **Not validated against a model** - the tool measures how much perturbation
   *survives* ingest, which is necessary but not sufficient. Whether that
   perturbation actually moves a model's output is unmeasured, and needs a
   model-in-the-loop evaluation harness that does not exist yet. Treat survival
@@ -600,21 +604,21 @@ However, some metadata may be lost during processing. If preserving all metadata
 - Single-threaded (batch processing could be parallelized)
 
 **What This Tool IS:**
-- ✅ A deterrent against automated scraping
-- ✅ A way to add computational cost to dataset harvesting
-- ✅ A practical tool for general-purpose image protection
-- ✅ Easy to use for non-technical users
+- A deterrent against automated scraping
+- A way to add computational cost to dataset harvesting
+- A practical tool for general-purpose image protection
+- Easy to use for non-technical users
 
 **What This Tool IS NOT:**
-- ❌ A guarantee against all AI training
-- ❌ A replacement for watermarking or rights management
-- ❌ A cryptographic security solution
+- A guarantee against all AI training
+- A replacement for watermarking or rights management
+- A cryptographic security solution
 
 **Recommendation:** Use this as **one layer** in a multi-layered protection strategy that includes watermarks, proper licensing, and monitoring.
 
 ---
 
-## 🐛 Known Issues
+## Known Issues
 
 ### Windows Defender / Antivirus Warnings
 **Problem:** Executable flagged as potentially unwanted program (PUP)
@@ -663,27 +667,29 @@ However, some metadata may be lost during processing. If preserving all metadata
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
-image-protector/
+Image-Protector/
 ├── image_protector.py              # Main application (CLI + GUI)
-├── pyproject.toml                  # Package metadata and build config
-├── requirements/
+├── pyproject.toml                  # Package metadata, build and lint config
+├── Requirements/
 │   ├── requirements.txt            # Core user dependencies
 │   └── dev-requirements.txt        # Development tools
-├── docs/
-│   ├── math.md                     # Mathematical method details
+├── Docs/
+│   ├── Math.md                     # Mathematical method details
 │   ├── acronym.md                  # Glossary of terms
 │   └── variable_flow.md            # Data flow documentation
+├── tests/
+│   └── test_image_protector.py     # Regression suite
 ├── .gitignore                      # Git ignore patterns
-├── LICENSE                         # MIT License
+├── LICENSE                         # Apache License 2.0
 └── README.md                       # This file
 ```
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Whether it's bug fixes, new features, documentation improvements, or performance optimizations.
 
@@ -715,7 +721,7 @@ pre-commit install
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 This project was inspired by and builds upon the pioneering work of:
 
@@ -740,21 +746,21 @@ This project was inspired by and builds upon the pioneering work of:
 
 ---
 
-## 📝 License
+## License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
 
-**TL;DR:** You can use this commercially, modify it, distribute it, and use it privately. Just include the license notice.
+**TL;DR:** You can use this commercially, modify it, distribute it, and use it privately. You must include the license notice and state any changes you made, and the licence grants you a patent licence from contributors.
 
 > **One exception:** the GUI's corner mascot is a third-party character, not
-> original work, so the MIT grant above does not cover that asset. It is
+> original work, so the Apache grant above does not cover that asset. It is
 > decoration only and nothing depends on it; see the mascot note under
 > [GUI Mode](#gui-mode) for how to remove it if you would rather ship the
 > project with a clean licence story.
 
 ---
 
-## 📚 Citation
+## Citation
 
 If you use this tool in research, publications, or commercial products, please cite:
 
@@ -771,12 +777,12 @@ If you use this tool in research, publications, or commercial products, please c
 
 ---
 
-## 📧 Contact
+## Contact
 
 **Bhargavaram Krishnapur**
 
-- 🐱 GitHub: [@Codex-Crusader](https://github.com/Codex-Crusader)
-- 📧 Email: [your.email@example.com](mailto:Bhargavaramkrishnapur@gmail.com)
+- GitHub: [@Codex-Crusader](https://github.com/Codex-Crusader)
+- Email: [your.email@example.com](mailto:Bhargavaramkrishnapur@gmail.com)
 
 **Project Link:** [https://github.com/Codex-Crusader/image-protector](https://github.com/Codex-Crusader/image-protector)
 
@@ -784,7 +790,7 @@ If you use this tool in research, publications, or commercial products, please c
 
 <div align="center">
 
-**Made with ❤️ by [Bhargavaram Krishnapur](https://github.com/Codex-Crusader)**
+**Made with by [Bhargavaram Krishnapur](https://github.com/Codex-Crusader)**
 
 Clankers need to learn about copyright infringement.
 (Yes, before you ask, Ma Boy ChatGPT gave me permission to say that.)
