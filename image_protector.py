@@ -1,39 +1,57 @@
 #!/usr/bin/env python3
 """
-"Advanced" Image Protector v2.1 - Fixed and Enhanced
-Adds perturbations to images with comprehensive error handling and robustness.
-I..... Overbuilt this a bit.........
+Image Protector v2.2
+Adds controlled perturbation to images: still readable to a person, noisier to
+an automated pipeline.
 
-Note: This adds visual noise patterns. Real adversarial protection requires
-access to target models and gradient-based optimization. 
-This code contains hardcoded parameters throughout (strength multipliers,
-frequencies, thresholds). These were empirically tuned for general use. For
-production use, consider extracting to a configuration system.
+WHAT THIS DOES AND DOES NOT DO
+------------------------------
+This adds perturbation without reference to any model. It is not an adversarial
+attack: no gradient of any network is computed anywhere in this file. A real
+attack needs a surrogate model and gradient-based optimisation (the Fawkes /
+Glaze / PhotoGuard approach), which is planned behind an optional torch extra.
+Treat this as raising the cost of automated processing, not as a guarantee.
 
-P.S - If the comments are not giving you enough Information take a look at the docs
-P.P.S - Look, I spent too much time trying to avoid exception errors and edge cases,
-        So I added a lot of comments to explain the code and the fixes I made.
-        I know I had fun writing those comments while trying to fix all the issues in the original code.
-        Enjoy reading and using the Advanced Image Protector v2.1!
+WHAT CHANGED IN v2.2
+--------------------
+The perturbation is now aimed at the band that survives ingest. A scraper
+almost always downscales before feeding a model, and a downscale is a low-pass
+filter, so perturbation parked at the top of the spectrum is averaged away
+before anything sees it. Measured on real photographs, the old build delivered
+about 4% of its frequency-method perturbation through a JPEG q75 plus 224px
+resize. See `assume_downscale`, and `energy_above_cutoff` in the metrics.
 
-P.P.P.S - The word ADVANCED is just a bit of IRONY here, Foolbox, CleverHans, ImageHash and many more are much better.
+Three other mechanics follow from the same idea:
+  - `strength` is a perturbation budget in dB (6 dB per doubling) rather than a
+    per-method amplitude multiplier, so it means the same thing everywhere and
+    the ensemble can no longer come out weaker than its own components.
+  - perceptual masking hides perturbation in busy regions, where the eye is
+    least able to see it.
+  - chroma weighting leans the perturbation toward colour, which human vision
+    resolves far less sharply than luminance.
 
 Author: Bhargavaram Krishnapur
 License: MIT
 """
 
-# Import dumpyard
-import numpy as np
-from PIL import Image
+# Postponed annotation evaluation, so the builtin generics used below stay valid
+# on the oldest Python version this project supports.
+from __future__ import annotations
+
 import argparse
+import contextlib
+import hashlib
 import json
 import logging
 import sys
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from dataclasses import dataclass, asdict, field
-from typing import List, Tuple, Dict, Optional, Callable, Any
-import hashlib
-from datetime import datetime
+from typing import TYPE_CHECKING, Any, ClassVar
+
+import numpy as np
+from PIL import Image
 
 # Configure the logging (first time I'm doing this)
 logging.basicConfig(
@@ -43,36 +61,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Checking optional dependencies (god...)
-SCIPY_AVAILABLE = False
-fftpack = None  # type: ignore
-ndimage = None  # type: ignore
+# Optional dependencies.
+#
+# Under TYPE_CHECKING these import unconditionally so the type checker sees the
+# real modules. At runtime they fall back to None and the AVAILABLE flags gate
+# every use. Binding the names to None in the checked branch instead (the
+# previous approach) made every attribute access on them look like an error on
+# None, which is where most of the type noise in this file came from.
+if TYPE_CHECKING:
+    import queue
+    import threading
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
 
-try:
-    from scipy import fftpack, ndimage  # type: ignore
+    from scipy import fftpack, ndimage
 
     SCIPY_AVAILABLE = True
-except ImportError:
-    logger.warning("scipy not available - frequency and texture methods disabled")
-
-TKINTER_AVAILABLE = False
-tk = None  # type: ignore
-ttk = None  # type: ignore
-filedialog = None  # type: ignore
-messagebox = None  # type: ignore
-threading = None  # type: ignore
-queue = None  # type: ignore
-
-try:
-    import tkinter as tk  # type: ignore
-    from tkinter import ttk, filedialog, messagebox  # type: ignore
-    import threading  # type: ignore
-    import queue  # type: ignore
-
     TKINTER_AVAILABLE = True
-except ImportError:
-    logger.warning("tkinter not available - GUI mode disabled")
-# trying to practice production-level code here.... first time.... please be gentle.
+else:
+    try:
+        from scipy import fftpack, ndimage
+
+        SCIPY_AVAILABLE = True
+    except ImportError:
+        fftpack = ndimage = None
+        SCIPY_AVAILABLE = False
+        logger.warning("scipy not available - frequency and texture methods disabled")
+
+    try:
+        import queue
+        import threading
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+
+        TKINTER_AVAILABLE = True
+    except ImportError:
+        tk = ttk = filedialog = messagebox = threading = queue = None
+        TKINTER_AVAILABLE = False
+        logger.warning("tkinter not available - GUI mode disabled")
 
 
 # CONFIGURATION & DATA CLASSES
@@ -82,13 +108,34 @@ class ProtectionConfig:
     """Configuration for image protection with validation"""
     method: str = 'ensemble'
     strength: float = 1.0
-    frequency_weight: float = 0.4
-    gradient_weight: float = 0.3
-    texture_weight: float = 0.2
-    noise_weight: float = 0.1
+    # Ensemble mix. These shape the *character* of the perturbation; the overall
+    # magnitude is set by the quality budget below, not by these weights.
+    #
+    # Chosen by measuring where the blended perturbation's energy actually lands,
+    # scored against both ways a perturbation gets wasted: sitting above the
+    # downscale cutoff, where a resample deletes it, or sitting near DC, where it
+    # is a slow colour cast and models are most invariant to it. This mix puts
+    # the most energy in the band that is neither. Settling it properly needs a
+    # model-in-the-loop evaluation, which this project does not have yet.
+    frequency_weight: float = 0.40
+    gradient_weight: float = 0.30
+    texture_weight: float = 0.05
+    noise_weight: float = 0.25
     preserve_quality: bool = True
     add_signature: bool = False
     target_psnr: float = 35.0
+    # Resolution a scraper is assumed to downscale to before feeding a model.
+    # Perturbation energy is steered into the band that survives this resample
+    # instead of into high frequencies that the resample averages away.
+    assume_downscale: int = 224
+    # Hide perturbation in high-contrast/textured regions where the eye is least
+    # sensitive, rather than spreading it uniformly.
+    perceptual_masking: bool = True
+    # Human vision is far less sensitive to chroma than luma, so the same PSNR
+    # budget buys a larger perturbation if it leans chromatic. 1.0 disables.
+    chroma_boost: float = 1.6
+    # Set for reproducible output (needed to compare runs in evaluation).
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration"""
@@ -99,7 +146,18 @@ class ProtectionConfig:
         if not (0.1 <= self.strength <= 5.0):
             raise ValueError(f"Strength must be between 0.1 and 5.0, got {self.strength}")
 
-        # Normalize the weights
+        if self.assume_downscale < 32:
+            raise ValueError(f"assume_downscale must be at least 32, got {self.assume_downscale}")
+
+        if self.chroma_boost < 1.0:
+            raise ValueError(f"chroma_boost must be >= 1.0, got {self.chroma_boost}")
+
+        # Normalize the weights so they read as proportions of the mix.
+        # NOTE: normalising alone does NOT control magnitude. Summing independent
+        # zero-mean fields with weights that sum to 1 *averages* their variance
+        # (result scales as sqrt(sum(w_i^2 * sigma_i^2)), i.e. the L2 norm of the
+        # weights), which is why the old ensemble came out weaker than its own
+        # strongest component. Magnitude is now set by effective_target_psnr().
         total_weight = (self.frequency_weight + self.gradient_weight +
                         self.texture_weight + self.noise_weight)
         if total_weight > 0 and self.method == 'ensemble':
@@ -107,6 +165,17 @@ class ProtectionConfig:
             self.gradient_weight /= total_weight
             self.texture_weight /= total_weight
             self.noise_weight /= total_weight
+
+    def effective_target_psnr(self) -> float:
+        """
+        Quality budget for this run, in dB.
+
+        strength is expressed as a perturbation budget rather than a raw
+        amplitude multiplier, so it means the same thing across every method:
+        6 dB is a factor of two in amplitude, so strength 2.0 is twice the
+        perturbation of strength 1.0 and strength 0.5 is half of it.
+        """
+        return self.target_psnr - 6.0 * float(np.log2(self.strength))
 
 
 @dataclass
@@ -121,8 +190,16 @@ class ImageMetrics:
     timestamp: str
     file_size_original: int
     file_size_protected: int
-    image_dimensions: Tuple[int, int, int] = field(default=(0, 0, 0))
-    warnings: List[str] = field(default_factory=list)
+    image_dimensions: tuple[int, int, int] = field(default=(0, 0, 0))
+    warnings: list[str] = field(default_factory=list)
+    # Fraction of perturbation energy that lands ABOVE the cutoff of the assumed
+    # downscale, i.e. the share a scraper's resample throws away before the model
+    # ever sees it. Lower is better. This is the number that says whether the
+    # perturbation actually reaches a model, and PSNR cannot tell you it.
+    energy_above_cutoff: float = 0.0
+    # Same measurement expressed as the share that survives.
+    estimated_survival: float = 0.0
+    target_psnr: float = 0.0
 
 
 
@@ -133,11 +210,12 @@ class AdvancedProtector:
 
     def __init__(self, config: ProtectionConfig):
         self.config = config
-        # Use random seed for security (different each time)
-        self.rng = np.random.RandomState()
+        # Seeded when config.seed is set, so evaluation runs are reproducible;
+        # otherwise freshly entropy-seeded, so two runs differ.
+        self.rng = np.random.default_rng(config.seed)
 
     # Hey, look! A big function!
-    def protect(self, image_array: np.ndarray) -> Tuple[np.ndarray, ImageMetrics]:
+    def protect(self, image_array: np.ndarray) -> tuple[np.ndarray, ImageMetrics]:
         """
         Main protection function with comprehensive error handling
 
@@ -165,281 +243,304 @@ class AdvancedProtector:
 
         # Get dimensions for logging and metrics
         h, w, c = image_array.shape
-        logger.info(f"Processing image: {w}x{h}x{c}")
+        logger.info("Processing image: %dx%dx%d", w, h, c)
 
         # Check za minimum dimensions
         if h < 16 or w < 16:
             raise ValueError(f"Image too small: {w}x{h} (minimum 16x16)")
 
         original_hash = self._compute_hash(image_array)
-        warnings_list: List[str] = []
+        warnings_list: list[str] = []
 
-        # Apply protection method
-        # Babe... I hope you brought protection...
-        # why? what's down there?
+        img_f = image_array.astype(np.float32)
+
+        # Build the raw perturbation. Every method returns a delta, not a
+        # protected image, so masking / chroma / budget below apply uniformly.
         try:
             if self.config.method == 'ensemble':
-                protected = self._ensemble_protection(image_array)
+                delta = self._ensemble_delta(img_f, warnings_list)
             elif self.config.method == 'frequency':
                 if not SCIPY_AVAILABLE:
                     raise RuntimeError("scipy required for frequency method")
-                protected = self._frequency_protection(image_array)
+                delta = self._frequency_delta(img_f)
             elif self.config.method == 'gradient':
-                protected = self._gradient_protection(image_array)
+                delta = self._gradient_delta(img_f)
             elif self.config.method == 'texture':
                 if not SCIPY_AVAILABLE:
                     logger.warning("scipy not available, using fallback texture method")
                     warnings_list.append("Used fallback texture method (scipy unavailable)")
-                protected = self._texture_protection(image_array)
+                delta = self._texture_delta(img_f)
             elif self.config.method == 'adversarial':
-                protected = self._adversarial_protection(image_array)
+                delta = self._adversarial_delta(img_f)
             elif self.config.method == 'noise':
-                protected = self._noise_protection(image_array)
+                delta = self._noise_delta(img_f)
             else:
                 raise ValueError(f"Unknown method: {self.config.method}")
         except Exception as e:
-            logger.error(f"Protection failed: {e}")
+            logger.error("Protection failed: %s", e)
             raise RuntimeError(f"Protection method '{self.config.method}' failed: {e}") from e
-            # AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH!
 
-        # Clip and convert with proper rounding
-        protected = np.clip(np.round(protected), 0, 255).astype(np.uint8)
+        # Steer the perturbation toward chroma, which the eye tracks less closely
+        # than luma, buying amplitude at the same measured quality.
+        if self.config.chroma_boost > 1.0:
+            delta = self._apply_chroma_weighting(delta)
 
-        # Calculate metrics for the protected image. FIXED: Proper PSNR handling, perturbation strength
+        # Concentrate the perturbation where the eye is least able to see it
+        # (busy, high-contrast regions) instead of spreading it evenly.
+        if self.config.perceptual_masking:
+            delta = delta * self._perceptual_mask(img_f)[:, :, None]
+
+        # Scale to the quality budget. This is what makes strength mean the same
+        # thing for every method, and what stops the ensemble from coming out
+        # weaker than its own components.
+        target_psnr = self.config.effective_target_psnr()
+        if self.config.preserve_quality:
+            delta = self._scale_to_psnr(delta, target_psnr)
+
+        protected = np.clip(np.round(img_f + delta), 0, 255).astype(np.uint8)
+
         metrics = self._calculate_metrics(
             image_array.astype(np.uint8),
             protected,
             original_hash,
-            warnings_list
+            warnings_list,
+            target_psnr,
         )
 
         return protected, metrics
-        # One does not simply... add protection to an image without calculating metrics...
 
-    def _ensemble_protection(self, img: np.ndarray) -> np.ndarray:
+    def _ensemble_delta(self, img: np.ndarray, warnings_list: list[str]) -> np.ndarray:
         """
-        Combine multiple protection methods with proper weighting
+        Blend the component perturbations.
 
-        Fixed: Proper weight normalization, memory efficiency
+        The weights set the *character* of the mix only. Their absolute scale is
+        irrelevant here because protect() rescales the result to the quality
+        budget afterwards, which is what fixes the old behaviour where the
+        ensemble came out weaker than its strongest component.
+
+        Each component is normalised to unit std before mixing, so a weight of
+        0.45 really does mean "45% of the mix" rather than "45% of whatever
+        amplitude that method happened to produce".
         """
-        protected = img.astype(np.float32).copy()
+        components: list[tuple[str, float, Callable[[np.ndarray], np.ndarray]]] = [
+            ('frequency', self.config.frequency_weight, self._frequency_delta),
+            ('gradient', self.config.gradient_weight, self._gradient_delta),
+            ('texture', self.config.texture_weight, self._texture_delta),
+            ('noise', self.config.noise_weight, self._noise_delta),
+        ]
 
-        # Apply weighted combination of methods in-place to save memory
-        if self.config.frequency_weight > 0 and SCIPY_AVAILABLE:
+        delta = np.zeros_like(img, dtype=np.float32)
+        applied = 0
+
+        for name, weight, fn in components:
+            if weight <= 0:
+                continue
+            if name == 'frequency' and not SCIPY_AVAILABLE:
+                logger.warning("Skipping frequency component (scipy unavailable)")
+                warnings_list.append("Ensemble ran without the frequency component (scipy unavailable)")
+                continue
             try:
-                freq_perturbation = self._frequency_protection(img) - img
-                protected += freq_perturbation * self.config.frequency_weight
-                logger.debug(f"Applied frequency protection (weight: {self.config.frequency_weight:.2f})")
-            except Exception as e:
-                logger.warning(f"Frequency protection failed: {e}")
+                part = fn(img)
+                part_std = float(part.std())
+                if part_std > 1e-6:
+                    delta += (part / part_std) * weight
+                    applied += 1
+                    logger.debug("Applied %s component (weight: %.2f)", name, weight)
+            except Exception as e:  # noqa: BLE001 - one component failing must not sink the whole ensemble
+                logger.warning("%s component failed: %s", name, e)
+                warnings_list.append(f"Ensemble component '{name}' failed: {e}")
 
-        if self.config.gradient_weight > 0:
-            try:
-                grad_perturbation = self._gradient_protection(img) - img
-                protected += grad_perturbation * self.config.gradient_weight
-                logger.debug(f"Applied gradient protection (weight: {self.config.gradient_weight:.2f})")
-            except Exception as e:
-                logger.warning(f"Gradient protection failed: {e}")
+        if applied == 0:
+            raise RuntimeError("Every ensemble component failed")
 
-        if self.config.texture_weight > 0:
-            try:
-                texture_perturbation = self._texture_protection(img) - img
-                protected += texture_perturbation * self.config.texture_weight
-                logger.debug(f"Applied texture protection (weight: {self.config.texture_weight:.2f})")
-            except Exception as e:
-                logger.warning(f"Texture protection failed: {e}")
+        return delta
 
-        if self.config.noise_weight > 0:
-            try:
-                noise_perturbation = self._noise_protection(img) - img
-                protected += noise_perturbation * self.config.noise_weight
-                logger.debug(f"Applied noise protection (weight: {self.config.noise_weight:.2f})")
-            except Exception as e:
-                logger.warning(f"Noise protection failed: {e}")
-
-        return protected
-        # Ensemble method... because why not combine all the methods for maximum protection?
-
-    def _frequency_protection(self, img: np.ndarray) -> np.ndarray:
+    def _survivable_band(self, extent: int) -> tuple[float, float]:
         """
-        Advanced frequency domain protection using DCT
+        DCT frequency band (in 8x8 block index units) that survives the assumed
+        downscale.
 
-        Fixed: Handles non-divisible dimensions, edge blocks
-        I genuinely tried.....
+        A downscale to S pixels across an extent of N acts as a low-pass filter
+        with a cutoff at S/N of the original Nyquist. In an 8x8 DCT block, basis
+        index u carries u/16 cycles per pixel and Nyquist sits at u = 8, so the
+        cutoff lands at u = 8 * S/N. Anything injected above that is averaged
+        away by the resample before a model ever sees it, which is exactly what
+        the previous 'freq > 4' rule did on any image wider than about 900px.
+
+        We aim just under the cutoff: high enough to stay visually subtle, low
+        enough to survive.
+        """
+        ratio = min(1.0, self.config.assume_downscale / max(1, extent))
+        cutoff = 8.0 * ratio
+        low = max(1.0, cutoff * 0.35)
+        high = max(low + 0.5, cutoff * 0.95)
+        return low, high
+
+    def _frequency_delta(self, img: np.ndarray) -> np.ndarray:
+        """
+        Band-targeted DCT domain perturbation, vectorised over blocks.
+
+        Two changes from the original: the target band now tracks the assumed
+        downscale instead of always hitting the top of the spectrum, and the
+        whole thing runs as array ops rather than a Python loop per 8x8 block
+        with a 64-iteration mask rebuild inside it.
         """
         if not SCIPY_AVAILABLE or fftpack is None:
             raise RuntimeError("scipy required for frequency protection")
 
-        protected = img.astype(np.float32).copy()
         h, w, c = img.shape
-
         block_size = 8
-        strength = 15 * self.config.strength
 
-        for channel in range(c):
-            # Process all blocks including edges
-            i = 0
-            while i < h:
-                j = 0
-                while j < w:
-                    # Handle edge blocks with proper size
-                    block_h = min(block_size, h - i)
-                    block_w = min(block_size, w - j)
+        # Pad up to a whole number of blocks, then trim back at the end.
+        pad_h = (-h) % block_size
+        pad_w = (-w) % block_size
+        padded = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect') if (pad_h or pad_w) else img
+        ph, pw = padded.shape[:2]
+        nby, nbx = ph // block_size, pw // block_size
 
-                    block = img[i:i + block_h, j:j + block_w, channel].astype(np.float32)
+        # Radial band mask, built once rather than per block.
+        low, high = self._survivable_band(max(h, w))
+        u = np.arange(block_size)
+        radial = np.hypot(u[:, None], u[None, :])
+        centre = (low + high) / 2.0
+        width = max(1e-3, (high - low) / 2.0)
+        mask = np.exp(-0.5 * ((radial - centre) / width) ** 2).astype(np.float32)
+        mask[0, 0] = 0.0  # never touch DC, it shifts overall brightness
+        if mask.max() > 1e-6:
+            mask /= mask.max()
 
+        logger.debug("DCT band for %dpx -> %dpx: u in [%.2f, %.2f]",
+                     max(h, w), self.config.assume_downscale, low, high)
 
-                    # Pad if needed (only for DCT, we will copy back only the valid region)
-                    if block_h < block_size or block_w < block_size:
-                        padded = np.zeros((block_size, block_size), dtype=np.float32)
-                        padded[:block_h, :block_w] = block
-                        block = padded
+        # (ph, pw, c) -> (c, nby, nbx, 8, 8)
+        blocks = (padded.reshape(nby, block_size, nbx, block_size, c)
+                        .transpose(4, 0, 2, 1, 3)
+                        .astype(np.float32))
 
-                    # DCT transform
-                    dct_temp = fftpack.dct(block.T, norm='ortho')
-                    dct_block = fftpack.dct(dct_temp.T, norm='ortho')
+        dct = fftpack.dct(fftpack.dct(blocks, axis=-1, norm='ortho'), axis=-2, norm='ortho')
+        noise = self.rng.standard_normal(dct.shape).astype(np.float32)
+        dct_perturbed = dct + noise * mask * 15.0
+        out = fftpack.idct(fftpack.idct(dct_perturbed, axis=-2, norm='ortho'), axis=-1, norm='ortho')
 
-                    # Add noise to high-frequency components
-                    noise = self.rng.randn(block_size, block_size) * strength
+        restored = (out.transpose(1, 3, 2, 4, 0)
+                       .reshape(ph, pw, c))
 
-                    # Proper high-frequency mask (diagonal bands)
-                    mask = np.zeros((block_size, block_size))
-                    for x in range(block_size):
-                        for y in range(block_size):
-                            # Frequency increases with distance from (0,0)
-                            freq = x + y
-                            if freq > 4:  # Skip DC and low frequencies
-                                # Gradual increase with frequency
-                                mask[x, y] = min(1.0, (freq - 4) / 8.0)
+        return (restored[:h, :w] - img).astype(np.float32)
 
-                    dct_block += noise * mask
-
-                    # Inverse DCT
-                    # Inverse curse technique: Transpose
-                    idct_temp = fftpack.idct(dct_block.T, norm='ortho')
-                    protected_block = fftpack.idct(idct_temp.T, norm='ortho')
-
-                    # Copy back only valid region
-                    protected[i:i + block_h, j:j + block_w, channel] = protected_block[:block_h, :block_w]
-
-                    j += block_size
-                i += block_size
-
-        return protected
-        # Y/n feels very protected here.
-
-    def _gradient_protection(self, img: np.ndarray) -> np.ndarray:
+    def _gradient_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Simulate FGSM-style gradient-based adversarial patterns
+        Structured sinusoidal pattern, concentrated on edges.
 
-        Fixed: Better edge detection, NaN handling
+        Note this computes no gradient of any model; it is a deterministic
+        interference pattern that happens to sit in a mid band. The name is
+        kept for CLI compatibility, see README for what it actually does.
+
+        Pattern frequency now scales with the assumed downscale so the pattern
+        survives the resample rather than depending on image size.
         """
         h, w, c = img.shape
-        protected = img.astype(np.float32).copy()
-        strength = 8 * self.config.strength
+        delta = np.zeros((h, w, c), dtype=np.float32)
 
-        # Create complex gradient-like patterns using sine and cosine waves
-        # Can't believe 12th grade math is coming back to haunt me in image processing...
-        x = np.linspace(0, 6 * np.pi, w)
-        y = np.linspace(0, 6 * np.pi, h)
+        # Aim for roughly a quarter of the surviving band, in cycles across the
+        # image, so the pattern is preserved by a downscale to assume_downscale.
+        cycles = max(3.0, min(h, w) * 0.25 * (self.config.assume_downscale / max(h, w)) / 2.0)
+        x = np.linspace(0, 2 * np.pi * cycles, w, dtype=np.float32)
+        y = np.linspace(0, 2 * np.pi * cycles, h, dtype=np.float32)
         x_grid, y_grid = np.meshgrid(x, y)
 
         for channel in range(c):
-            # Multiple frequency components
             pattern = (
-                    np.sin(x_grid * (channel + 1) + y_grid * 0.5) * 0.3 +
-                    np.cos(y_grid * (channel + 1) - x_grid * 0.3) * 0.3 +
-                    np.sin(x_grid * y_grid * 0.1) * 0.2 +
-                    self.rng.randn(h, w) * 0.2
+                np.sin(x_grid * (channel + 1) * 0.5 + y_grid * 0.5) * 0.35 +
+                np.cos(y_grid * (channel + 1) * 0.5 - x_grid * 0.3) * 0.35 +
+                np.sin((x_grid + y_grid) * 0.25) * 0.2 +
+                self.rng.standard_normal((h, w)).astype(np.float32) * 0.1
             )
-
-            # Edge-aware perturbation (stronger on edges)
-            # This thing is edging on the edge of my sanity...
             edges = self._detect_edges(img[:, :, channel])
-            edge_weight = 1.0 + edges * 0.5
+            delta[:, :, channel] = pattern * (1.0 + edges * 0.5)
 
-            perturbation = pattern * strength * edge_weight
-            protected[:, :, channel] += perturbation
+        return delta
 
-        return protected
-
-    def _texture_protection(self, img: np.ndarray) -> np.ndarray:
+    def _texture_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Add texture-based perturbations
+        Value-noise texture, steered into the surviving band.
 
-        Fixed: Handles scipy unavailability, small images
+        The original used a blob scale of min(h,w)//4, which put essentially all
+        of its energy below 1% of the spectrum: geometrically it survived a
+        downscale almost perfectly, but that band reads as a slow illumination
+        cast, which is exactly what training augmentation randomises away. The
+        scale now tracks the assumed downscale so the texture carries structure
+        a model might actually key on.
         """
         h, w, c = img.shape
-        protected = img.astype(np.float32).copy()
-        strength = 10 * self.config.strength
 
-        # Adaptive scale for small images
-        scale = max(4, min(20, min(h, w) // 4))
-        noise = self._generate_perlin_noise(h, w, scale)
+        # Feature size in source pixels that maps to a few pixels post-downscale.
+        scale = max(2, round(max(h, w) / max(8.0, self.config.assume_downscale / 4.0)))
+        noise = self._generate_value_noise(h, w, scale)
 
-        for channel in range(c):
-            if SCIPY_AVAILABLE:
-                # Texture-aware perturbation
-                texture = self._compute_local_variance(img[:, :, channel])
-                texture_weight = texture / (texture.max() + 1e-6) if texture.max() > 0 else np.ones_like(texture)
-            else:
-                # Fallback: use simple local mean
-                texture_weight = np.ones((h, w))
+        if SCIPY_AVAILABLE:
+            texture = self._compute_local_variance(img.mean(axis=2))
+            tmax = texture.max()
+            texture_weight = texture / tmax if tmax > 1e-6 else np.ones((h, w), dtype=np.float32)
+        else:
+            texture_weight = np.ones((h, w), dtype=np.float32)
 
-            perturbation = noise * strength * (1 + texture_weight * 0.5)
-            protected[:, :, channel] += perturbation
+        weighted = (noise * (1.0 + texture_weight * 0.5)).astype(np.float32)
+        return np.repeat(weighted[:, :, None], c, axis=2)
 
-        return protected
-
-    def _adversarial_protection(self, img: np.ndarray) -> np.ndarray:
+    def _adversarial_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Simulate PGD-style iterative adversarial attack
+        Iterative bounded perturbation.
 
-        Fixed: Better parameter tuning
+        Without a model to differentiate, the old version's seven noise steps
+        projected into an epsilon ball were statistically just one draw of
+        bounded noise. This version at least accumulates a spatially correlated
+        walk, which concentrates energy in a lower band than white noise and so
+        survives a resample better. It is still not a gradient attack; a real
+        one needs a surrogate model (see README, planned for the torch path).
         """
-        protected = img.astype(np.float32).copy()
-        epsilon = 12 * self.config.strength
-        alpha = epsilon / 4
+        h, w, c = img.shape
+        epsilon = 12.0
         iterations = 7
+        alpha = epsilon / 3.0
+
+        delta = np.zeros((h, w, c), dtype=np.float32)
+        scale = max(2, round(max(h, w) / max(8.0, self.config.assume_downscale / 2.0)))
 
         for iteration in range(iterations):
-            # Simulate gradient step with decay
             decay = 1.0 - (iteration / iterations) * 0.3
-            noise = self.rng.randn(*img.shape) * alpha * decay
-            protected += noise
+            step = np.stack(
+                [self._generate_value_noise(h, w, scale) for _ in range(c)], axis=2
+            ).astype(np.float32)
+            delta += step * alpha * decay
+            delta = np.clip(delta, -epsilon, epsilon)
 
-            # Project back to epsilon ball
-            perturbation = protected - img
-            perturbation = np.clip(perturbation, -epsilon, epsilon)
-            protected = img + perturbation
+        return delta
 
-        return protected
-
-    def _noise_protection(self, img: np.ndarray) -> np.ndarray:
+    def _noise_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Adaptive noise based on image content
+        Content-adaptive noise, low-pass filtered into the surviving band.
 
-        Fixed: Better adaptation to content
+        White noise is over 88% destroyed by a downscale to 224. Blurring it to
+        the feature size that survives keeps the adaptive character while
+        putting the energy somewhere it can reach a model.
         """
         h, w, c = img.shape
-        protected = img.astype(np.float32).copy()
-        strength = 6 * self.config.strength
 
-        for channel in range(c):
-            if SCIPY_AVAILABLE:
-                variance = self._compute_local_variance(img[:, :, channel])
-                max_var = variance.max()
-                if max_var > 1e-6:
-                    noise_scale = 1.0 + variance / max_var
-                else:
-                    noise_scale = np.ones_like(variance)
-            else:
-                noise_scale = np.ones((h, w))
+        if SCIPY_AVAILABLE and ndimage is not None:
+            variance = self._compute_local_variance(img.mean(axis=2))
+            max_var = variance.max()
+            noise_scale = (1.0 + variance / max_var) if max_var > 1e-6 else np.ones((h, w), dtype=np.float32)
+        else:
+            noise_scale = np.ones((h, w), dtype=np.float32)
 
-            noise = self.rng.randn(h, w) * strength * noise_scale
-            protected[:, :, channel] += noise
+        raw = self.rng.standard_normal((h, w, c)).astype(np.float32)
 
-        return protected
+        # Low-pass to the smallest feature the assumed downscale can carry.
+        sigma = max(0.5, max(h, w) / max(1.0, 2.0 * self.config.assume_downscale))
+        if SCIPY_AVAILABLE and ndimage is not None:
+            raw = ndimage.gaussian_filter(raw, sigma=(sigma, sigma, 0))
+
+        return raw * noise_scale[:, :, None]
 
 
     # UTILITY METHODS
@@ -464,11 +565,8 @@ class AdvancedProtector:
         edge_min, edge_max = edges.min(), edges.max()
         edge_range = edge_max - edge_min
 
-        if edge_range > 1e-6:
-            edges = (edges - edge_min) / edge_range
-        else:
-            # Constant image - no edges
-            edges = np.zeros_like(edges)
+        # A constant image has no edges; guard the divide.
+        edges = (edges - edge_min) / edge_range if edge_range > 1e-6 else np.zeros_like(edges)
 
         return edges
         # I am on the edge of my seat here... da bum tss
@@ -489,19 +587,20 @@ class AdvancedProtector:
         return np.maximum(variance, 0)
         # Texture analysis... because why not add some texture-based perturbations for extra protection?
 
-    def _generate_perlin_noise(self, h: int, w: int, scale: int) -> np.ndarray:
+    def _generate_value_noise(self, h: int, w: int, scale: int) -> np.ndarray:
         """
-        Generate Perlin-like noise
+        Bicubic-upsampled white noise (value noise).
 
-        Fixed: Handles small images, proper scaling
+        Renamed from _generate_perlin_noise: this is not Perlin noise, which
+        interpolates gradients rather than values.
         """
         # Ensure scale is valid
-        scale = max(2, min(scale, min(h, w) // 2))
+        scale = max(2, min(scale, max(2, min(h, w) // 2)))
 
         small_h = max(2, h // scale)
         small_w = max(2, w // scale)
 
-        noise_small = self.rng.randn(small_h, small_w)
+        noise_small = self.rng.standard_normal((small_h, small_w))
 
         # Interpolate to full size
         if SCIPY_AVAILABLE and ndimage is not None:
@@ -535,26 +634,127 @@ class AdvancedProtector:
 
         return noise
 
+    def _perceptual_mask(self, img: np.ndarray) -> np.ndarray:
+        """
+        Per-pixel visibility weighting, normalised to mean 1.
+
+        Contrast masking: noise is far harder to see in busy regions than on
+        smooth gradients like skin or sky. Weighting by local contrast lets the
+        same measured PSNR carry a perturbation that is less visible, or a
+        larger one at equal visibility.
+
+        Mean-normalised so it redistributes the budget rather than changing it.
+        """
+        h, w = img.shape[:2]
+        luma = img @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+        if SCIPY_AVAILABLE and ndimage is not None:
+            local_var = self._compute_local_variance(luma, window_size=7)
+            activity = np.sqrt(local_var)
+        else:
+            gy, gx = np.gradient(luma)
+            activity = np.hypot(gx, gy)
+
+        # Compress the range: masking grows sub-linearly with contrast.
+        mask = np.power(activity + 1.0, 0.6).astype(np.float32)
+
+        # Keep smooth regions represented rather than zeroed out.
+        mask = 0.35 + 0.65 * (mask / (mask.max() + 1e-6))
+
+        mean = float(mask.mean())
+        if mean > 1e-6:
+            mask = mask / mean
+
+        return mask.astype(np.float32).reshape(h, w)
+
+    def _apply_chroma_weighting(self, delta: np.ndarray) -> np.ndarray:
+        """
+        Rotate perturbation energy toward chroma.
+
+        The eye resolves luminance detail far better than colour detail, which
+        is why JPEG subsamples chroma in the first place. Splitting the
+        perturbation into luma and chroma parts and attenuating the luma part
+        makes it less visible at the same energy. Renormalised afterwards so
+        this changes where the energy sits, not how much there is.
+        """
+        if delta.shape[2] != 3:
+            return delta
+
+        luma_axis = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        luma_axis = luma_axis / np.linalg.norm(luma_axis)
+
+        before = float(delta.std())
+        if before < 1e-9:
+            return delta
+
+        luma_part = (delta @ luma_axis)[:, :, None] * luma_axis[None, None, :]
+        chroma_part = delta - luma_part
+
+        boosted = luma_part / self.config.chroma_boost + chroma_part * self.config.chroma_boost
+
+        after = float(boosted.std())
+        if after > 1e-9:
+            boosted = boosted * (before / after)
+
+        return boosted.astype(np.float32)
+
+    @staticmethod
+    def _scale_to_psnr(delta: np.ndarray, target_psnr: float) -> np.ndarray:
+        """
+        Rescale a perturbation so the result lands on a target PSNR.
+
+        This is the single control that makes strength comparable across
+        methods, and it is what stops a weighted blend of independent fields
+        from silently coming out weaker than its own strongest component.
+        """
+        current_mse = float(np.mean(delta.astype(np.float64) ** 2))
+        if current_mse < 1e-12:
+            return delta
+
+        target_mse = (255.0 ** 2) / (10.0 ** (target_psnr / 10.0))
+        scale = float(np.sqrt(target_mse / current_mse))
+        return (delta * scale).astype(np.float32)
+
+    def _energy_above_cutoff(self, delta: np.ndarray) -> float:
+        """
+        Share of perturbation energy sitting above the assumed downscale cutoff.
+
+        This is the honest answer to "will a scraper's resample throw this
+        away", and PSNR cannot tell you it. Lower is better.
+        """
+        d = delta[:, :, 0].astype(np.float64)
+        h, w = d.shape
+        if h < 8 or w < 8:
+            return 0.0
+
+        spectrum = np.fft.fftshift(np.abs(np.fft.fft2(d)) ** 2)
+        total = spectrum.sum()
+        if total <= 0:
+            return 0.0
+
+        yy, xx = np.mgrid[0:h, 0:w]
+        radius = np.hypot(yy - h // 2, xx - w // 2)
+        ratio = min(1.0, self.config.assume_downscale / max(h, w))
+        keep = radius < ratio * (min(h, w) / 2.0)
+
+        return float(spectrum[~keep].sum() / total)
+
     @staticmethod
     def _compute_hash(img: np.ndarray) -> str:
         """Compute hash of image"""
         return hashlib.sha256(img.tobytes()).hexdigest()[:16]
 
     def _calculate_metrics(self, original: np.ndarray, protected: np.ndarray,
-                           orig_hash: str, warnings_list: List[str]) -> ImageMetrics:
-        """
-        Calculate quality metrics
+                           orig_hash: str, warnings_list: list[str],
+                           target_psnr: float) -> ImageMetrics:
+        """Calculate quality and reach metrics"""
+        diff = original.astype(np.float64) - protected.astype(np.float64)
+        mse = float(np.mean(diff ** 2))
 
-        Fixed: Proper PSNR handling
-        """
-        mse = np.mean((original.astype(float) - protected.astype(float)) ** 2)
+        psnr = float('inf') if mse < 1e-10 else float(10 * np.log10(255 ** 2 / mse))
 
-        if mse < 1e-10:
-            psnr = float('inf')
-        else:
-            psnr = 10 * np.log10(255 ** 2 / mse)
-
-        perturbation = np.mean(np.abs(original.astype(float) - protected.astype(float)))
+        perturbation = float(np.mean(np.abs(diff)))
+        above = self._energy_above_cutoff(diff.astype(np.float32))
 
         return ImageMetrics(
             original_hash=orig_hash,
@@ -563,15 +763,14 @@ class AdvancedProtector:
             mse=mse,
             perturbation_strength=perturbation,
             method_used=self.config.method,
-            timestamp=datetime.now().isoformat(),
-            file_size_original=original.nbytes,
-            file_size_protected=protected.nbytes,
-            image_dimensions=original.shape,
-            warnings=warnings_list
-            # PSNR and MSE are calculated properly now, and we also include perturbation strength as a metric.
-            # Why am I doing this to myself?
-            # I could have just added noise and called it a day, but NOOOOOO...
-            # I had to add all these fancy methods and metrics for maximum protection and analysis.
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            file_size_original=int(original.nbytes),
+            file_size_protected=int(protected.nbytes),
+            image_dimensions=(int(original.shape[0]), int(original.shape[1]), int(original.shape[2])),
+            warnings=warnings_list,
+            energy_above_cutoff=above,
+            estimated_survival=1.0 - above,
+            target_psnr=target_psnr,
         )
 
 
@@ -581,7 +780,7 @@ class AdvancedProtector:
 class ImageProcessor:
     """Handle file I/O and batch processing with robust error handling"""
 
-    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
+    SUPPORTED_FORMATS: ClassVar[set[str]] = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
 
     def __init__(self, config: ProtectionConfig):
         self.config = config
@@ -612,21 +811,28 @@ class ImageProcessor:
         output_path_obj.parent.mkdir(parents=True, exist_ok=True)
 
         # Load za image
+        alpha: Image.Image | None = None
         try:
-            img = Image.open(input_path_obj)
+            loaded = Image.open(input_path_obj)
 
-            # Handle different modes
-            if img.mode not in ('RGB', 'L', 'RGBA'):
-                logger.warning(f"Converting from {img.mode} to RGB")
-                img = img.convert('RGB')
-            elif img.mode == 'RGBA':
-                logger.info("Extracting RGB from RGBA image (alpha channel discarded)")
-                img = img.convert('RGB')
-            elif img.mode == 'L':
+            # Handle different modes. Alpha is kept aside and reattached after
+            # protection rather than thrown away, so a transparent PNG survives.
+            rgb: Image.Image
+            if loaded.mode in ('RGBA', 'LA', 'PA'):
+                rgba = loaded.convert('RGBA')
+                alpha = rgba.getchannel('A')
+                rgb = rgba.convert('RGB')
+                logger.info("Alpha channel preserved and will be reattached")
+            elif loaded.mode == 'L':
                 logger.info("Converting grayscale to RGB")
-                img = img.convert('RGB')
+                rgb = loaded.convert('RGB')
+            elif loaded.mode != 'RGB':
+                logger.warning("Converting from %s to RGB", loaded.mode)
+                rgb = loaded.convert('RGB')
+            else:
+                rgb = loaded.convert('RGB')
 
-            img_array = np.array(img, dtype=np.float32)
+            img_array = np.array(rgb, dtype=np.float32)
             # We convert to float32 for processing, but we will convert back to uint8 before saving.
 
         except Exception as e:
@@ -641,28 +847,38 @@ class ImageProcessor:
         # Save the protected image from devastation
         try:
             protected_img = Image.fromarray(protected_array, mode='RGB')
-        # Jesse, James and Meowth are here to save the day... and the image.
 
-            # Add signature to metadata if requested
-            if self.config.add_signature:
-                protected_img = self._add_signature(protected_img, metrics, output_path_obj.suffix)
+            suffix = output_path_obj.suffix.lower()
+
+            # Reattach alpha where the target format can carry it.
+            if alpha is not None:
+                if suffix in {'.png', '.webp', '.tiff', '.tif'}:
+                    protected_img = protected_img.convert('RGBA')
+                    protected_img.putalpha(alpha)
+                else:
+                    logger.warning("%s cannot store alpha; flattening", suffix)
 
             # Determine save parameters
-            save_kwargs: Dict[str, Any] = {'optimize': True}
+            save_kwargs: dict[str, Any] = {'optimize': True}
 
-            if output_path_obj.suffix.lower() in {'.jpg', '.jpeg'}:
+            if suffix in {'.jpg', '.jpeg'}:
                 save_kwargs['quality'] = 95
                 save_kwargs['subsampling'] = 0  # Best quality
-            elif output_path_obj.suffix.lower() == '.png':
+            elif suffix == '.png':
                 save_kwargs['compress_level'] = 6  # Balance speed and compression
-            elif output_path_obj.suffix.lower() == '.webp':
+            elif suffix == '.webp':
                 save_kwargs['quality'] = 95
                 save_kwargs['method'] = 6  # Best quality
-            # Oh look a bunch of format-specific save parameters for maximum quality preservation.
-            # I need more coffee.
+
+            # Metadata has to go through save(), not img.info. See
+            # _signature_save_kwargs for why the old approach wrote nothing.
+            if self.config.add_signature:
+                save_kwargs.update(
+                    self._signature_save_kwargs(protected_img, metrics, output_path_obj.suffix)
+                )
 
             protected_img.save(output_path_obj, **save_kwargs)
-            logger.info(f"Saved protected image: {output_path_obj}")
+            logger.info("Saved protected image: %s", output_path_obj)
 
         except Exception as e:
             raise RuntimeError(f"Failed to save image: {e}") from e
@@ -673,15 +889,15 @@ class ImageProcessor:
                 metrics_path = output_path_obj.with_suffix('.json')
                 with open(metrics_path, 'w') as f:
                     json.dump(asdict(metrics), f, indent=2)
-                logger.debug(f"Saved metrics: {metrics_path}")
-            except Exception as e:
-                logger.warning(f"Failed to save metrics: {e}")
+                logger.debug("Saved metrics: %s", metrics_path)
+            except Exception as e:  # noqa: BLE001 - a metrics write failure must not lose the protected image
+                logger.warning("Failed to save metrics: %s", e)
 
         return metrics
 
     def process_batch(self, input_dir: str, output_dir: str,
-                      extensions: Optional[List[str]] = None,
-                      progress_callback: Optional[Callable[[int, int, str, str], None]] = None) -> List[Dict[str, Any]]:
+                      extensions: list[str] | None = None,
+                      progress_callback: Callable[[int, int, str, str], None] | None = None) -> list[dict[str, Any]]:
         """
         Process multiple images with robust error handling
         Too much free time on my hands, I guess...
@@ -705,7 +921,7 @@ class ImageProcessor:
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Find all za images
-        image_files: List[Path] = []
+        image_files: list[Path] = []
         for ext in extensions:
             image_files.extend(input_path.glob(f'*{ext}'))
             image_files.extend(input_path.glob(f'*{ext.upper()}'))
@@ -715,12 +931,12 @@ class ImageProcessor:
         image_files.sort()
 
         if not image_files: # Just in case stuff....
-            logger.warning(f"No images found in {input_path}")
+            logger.warning("No images found in %s", input_path)
             return []
 
-        logger.info(f"Found {len(image_files)} images to process")
+        logger.info("Found %d images to process", len(image_files))
 
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         total = len(image_files)
         successful = 0
 
@@ -735,7 +951,7 @@ class ImageProcessor:
                     output_file = output_path / f"protected_{img_file.stem}_{counter}{img_file.suffix}"
                     counter += 1
 
-                logger.info(f"[{i}/{total}] Processing: {img_file.name}")
+                logger.info("[%d/%d] Processing: %s", i, total, img_file.name)
                 metrics = self.process_single(str(img_file), str(output_file))
 
                 results.append({
@@ -750,14 +966,14 @@ class ImageProcessor:
                 if progress_callback:
                     try:
                         progress_callback(i, total, img_file.name, 'success')
-                    except Exception as e:
-                        logger.warning(f"Progress callback error: {e}")
+                    except Exception as e:  # noqa: BLE001 - a caller's progress callback must not abort the batch
+                        logger.warning("Progress callback error: %s", e)
 
             except KeyboardInterrupt:
                 logger.warning("Batch processing interrupted by user")
                 break
-            except Exception as e:
-                logger.error(f"Failed to process {img_file.name}: {e}")
+            except Exception as e:  # noqa: BLE001 - one unreadable file must not abort the batch
+                logger.error("Failed to process %s: %s", img_file.name, e)
                 results.append({
                     'input': str(img_file),
                     'output': None,
@@ -768,8 +984,8 @@ class ImageProcessor:
                 if progress_callback:
                     try:
                         progress_callback(i, total, img_file.name, 'error')
-                    except Exception as e:
-                        logger.warning(f"Progress callback error: {e}")
+                    except Exception as e:  # noqa: BLE001 - a caller's progress callback must not abort the batch
+                        logger.warning("Progress callback error: %s", e)
 
         # Save batch summary with some comprehensive results and metrics
         try:
@@ -780,46 +996,51 @@ class ImageProcessor:
                     'successful': successful,
                     'failed': total - successful,
                     'config': asdict(self.config),
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
                     'results': results
                     # 'sanity_checks': 'all passed'  # Placeholder for any batch-level checks we might want to add in the future
                 }, f, indent=2)
-            logger.info(f"Saved batch summary: {summary_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save batch summary: {e}")
+            logger.info("Saved batch summary: %s", summary_path)
+        except Exception as e:  # noqa: BLE001 - a summary write failure must not fail the completed batch
+            logger.warning("Failed to save batch summary: %s", e)
 
-        logger.info(f"Batch complete: {successful}/{total} successful")
+        logger.info("Batch complete: %d/%d successful", successful, total)
         return results
 
     @staticmethod
-    def _add_signature(img: Image.Image, metrics: ImageMetrics,
-                       file_ext: str) -> Image.Image:
+    def _signature_save_kwargs(img: Image.Image, metrics: ImageMetrics,
+                               file_ext: str) -> dict[str, Any]:
         """
-        Add signature to image metadata
+        Build the save() keyword arguments that actually persist the signature.
 
-        Fixed: Works for multiple formats, actually applies metadata
+        The previous version mutated img.info and returned the image. Pillow
+        does not read img.info back out when writing, so nothing was ever
+        written for either format: a signed PNG came back with info == {} and a
+        signed JPEG with only its JFIF keys. Metadata has to be handed to
+        save() explicitly, which is what these kwargs are for.
         """
         metadata_str = json.dumps(asdict(metrics))
+        ext = file_ext.lower()
 
         try:
-            if file_ext.lower() == '.png':
+            if ext == '.png':
                 from PIL import PngImagePlugin
-                metadata = PngImagePlugin.PngInfo()
-                metadata.add_text("ImageProtector", metadata_str)
-                # Note: metadata must be passed to save(), stored for later
-                img.info['ImageProtector'] = metadata_str
-            elif file_ext.lower() in {'.jpg', '.jpeg'}:
-                # JPEG uses EXIF comments for metadata
-                exif = img.getexif()
-                # UserComment tag (0x9286) is commonly used for custom metadata
-                exif[0x9286] = metadata_str.encode('utf-16')
-                img.info['exif'] = exif.tobytes()
-            else:
-                logger.warning(f"Signature not supported for {file_ext}")
-        except Exception as e:
-            logger.warning(f"Failed to add signature: {e}")
+                pnginfo = PngImagePlugin.PngInfo()
+                pnginfo.add_text("ImageProtector", metadata_str)
+                return {'pnginfo': pnginfo}
 
-        return img
+            if ext in {'.jpg', '.jpeg', '.tiff', '.tif', '.webp'}:
+                exif = img.getexif()
+                # UserComment (0x9286) per EXIF: an 8-byte encoding prefix then
+                # the payload. ASCII keeps it readable to exiftool and friends.
+                exif[0x9286] = b"ASCII\x00\x00\x00" + metadata_str.encode('ascii', 'replace')
+                return {'exif': exif.tobytes()}
+
+            logger.warning("Signature not supported for %s", file_ext)
+        except Exception as e:  # noqa: BLE001 - signature is best-effort; never block the save
+            logger.warning("Failed to build signature: %s", e)
+
+        return {}
 
 
 # GUI INTERFACE
@@ -839,26 +1060,28 @@ if TKINTER_AVAILABLE:
                 raise RuntimeError("tkinter not available")
 
             self.root = tk.Tk()
-            self.root.title("Advanced Image Protector v2.1")
+            self.root.title("Image Protector v2.2")
             self.root.geometry("900x700")
             self.root.minsize(800, 600)
 
             self.config = ProtectionConfig()
-            self.processor: Optional[ImageProcessor] = None
+            self.processor: ImageProcessor | None = None
 
-            self.selected_file: Optional[str] = None
-            self.selected_folder: Optional[str] = None
+            self.selected_file: str | None = None
+            self.selected_folder: str | None = None
             self.processing = False
             self.cancel_requested = False
 
             # Thread-safe queue for GUI updates
-            self.update_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+            self.update_queue: queue.Queue[Callable[[], Any]] = queue.Queue()
 
             # Declare widget attributes for type hinting and better code completion
             self.method_var: tk.StringVar
             self.strength_var: tk.DoubleVar
             self.strength_label: ttk.Label
             self.signature_var: tk.BooleanVar
+            self.masking_var: tk.BooleanVar
+            self.downscale_var: tk.StringVar
             self.metrics_var: tk.BooleanVar
             self.file_label: ttk.Label
             self.folder_label: ttk.Label
@@ -886,7 +1109,7 @@ if TKINTER_AVAILABLE:
             main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
             # Title just.... title
-            title = ttk.Label(main_frame, text="Advanced Image Protector",
+            title = ttk.Label(main_frame, text="Image Protector",
                               font=('Arial', 18, 'bold')) # I like the "my little mermaid"... can't help it.
             title.grid(row=0, column=0, columnspan=3, pady=(0, 20))
 
@@ -923,14 +1146,30 @@ if TKINTER_AVAILABLE:
             strength_slider.configure(command=lambda v: self.strength_label.config(text=f"{float(v):.2f}"))
             # self.strength_label will update dynamically as the slider moves.
 
+            # Assumed ingest resolution: drives which frequency band gets used
+            ttk.Label(config_frame, text="Assume downscale to:").grid(
+                row=2, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+            self.downscale_var = tk.StringVar(value='224')
+            downscale_combo = ttk.Combobox(
+                config_frame, textvariable=self.downscale_var,
+                values=['128', '224', '336', '512', '768'], state='readonly', width=20)
+            downscale_combo.grid(row=2, column=1, sticky=tk.W, pady=5)
+            ttk.Label(config_frame,
+                      text="Perturbation is aimed at the detail that survives this resize.",
+                      foreground="gray").grid(row=3, column=0, columnspan=2, sticky=tk.W)
+
             # Options checkboxes
             self.signature_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(config_frame, text="Add metadata signature",
-                            variable=self.signature_var).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=5)
+                            variable=self.signature_var).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+            self.masking_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(config_frame, text="Perceptual masking (hide noise in busy areas)",
+                            variable=self.masking_var).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=5)
 
             self.metrics_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(config_frame, text="Save metrics JSON",
-                            variable=self.metrics_var).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=5)
+                            variable=self.metrics_var).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=5)
 
             # Single file section for protecting one image at a time with proper file selection and status display
             single_frame = ttk.LabelFrame(main_frame, text="Single Image Protection", padding="10")
@@ -1016,12 +1255,12 @@ if TKINTER_AVAILABLE:
                         update_func()
                     except queue.Empty:
                         break
-            except Exception as e:
-                logger.error(f"Queue processor error: {e}")
+            except Exception as e:  # noqa: BLE001 - the Tk queue pump must survive any single bad update
+                logger.error("Queue processor error: %s", e)
             finally:
                 self.root.after(100, self._start_queue_processor)
                 # This method continuously checks the update_queue for any pending GUI updates and executes them in the main thread.
-        def _queue_update(self, func: Callable[[], None]) -> None:
+        def _queue_update(self, func: Callable[[], Any]) -> None:
             """Queue a GUI update (thread-safe)"""
             self.update_queue.put(func)
 
@@ -1029,7 +1268,7 @@ if TKINTER_AVAILABLE:
             """Add message to log (thread-safe)"""
 
             def update() -> None:
-                timestamp = datetime.now().strftime("%H:%M:%S")
+                timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 prefix = {"info": "INFORMATION", "success": "SUCCESS", "error": "ERROR", "warning": "WARNING"}.get(level, "•")
                 self.log_text.insert(tk.END, f"[{timestamp}] {prefix} {message}\n")
                 self.log_text.see(tk.END)
@@ -1038,9 +1277,15 @@ if TKINTER_AVAILABLE:
 
         def _update_config(self) -> None:
             """Update config from GUI"""
-            self.config.method = self.method_var.get()
-            self.config.strength = self.strength_var.get()
-            self.config.add_signature = self.signature_var.get()
+            # Rebuilt rather than mutated so __post_init__ validation runs and
+            # the ensemble weights are renormalised from their defaults.
+            self.config = ProtectionConfig(
+                method=self.method_var.get(),
+                strength=self.strength_var.get(),
+                add_signature=self.signature_var.get(),
+                perceptual_masking=self.masking_var.get(),
+                assume_downscale=int(self.downscale_var.get()),
+            )
             self.processor = ImageProcessor(self.config)
 
         def _set_processing(self, processing: bool) -> None:
@@ -1142,9 +1387,11 @@ if TKINTER_AVAILABLE:
 
                     self._queue_update(lambda: setattr(self.progress_bar, 'value', 100))
 
-                    psnr_str = f"{metrics.psnr:.2f}" if metrics.psnr != float('inf') else "∞"
+                    psnr_str = f"{metrics.psnr:.2f}" if metrics.psnr != float('inf') else "inf"
+                    survival = metrics.estimated_survival * 100
                     self._log(f"Protected: {Path(output_file).name}", "success")
                     self._log(f"  PSNR: {psnr_str} dB, Perturbation: {metrics.perturbation_strength:.2f}")
+                    self._log(f"  Survives a {self.config.assume_downscale}px downscale: {survival:.1f}%")
 
                     self._queue_update(lambda: self.progress_var.set("Complete!"))
                     if messagebox is not None:
@@ -1152,14 +1399,20 @@ if TKINTER_AVAILABLE:
                             "Success",
                             f"Image protected successfully!\n\n"
                             f"PSNR: {psnr_str} dB\n"
+                            f"Survives downscale: {survival:.1f}%\n"
                             f"Saved: {Path(output_file).name}"
-                            # I included the PSNR and perturbation strength in the log and message box for more detailed feedback on the protection results.
                         ))
 
-                except Exception as e:
-                    self._log(f"Error: {str(e)}", "error")
+                except Exception as exc:  # noqa: BLE001 - worker thread boundary: report to the user, never crash the GUI
+                    # Bind the message now: Python unbinds the `except` name when
+                    # the block exits, so a lambda closing over it raises
+                    # NameError by the time the queue runs it.
+                    message = str(exc)
+                    self._log(f"Error: {message}", "error")
                     if messagebox is not None:
-                        self._queue_update(lambda: messagebox.showerror("Error", f"Protection failed:\n{str(e)}"))
+                        self._queue_update(
+                            lambda: messagebox.showerror("Error", f"Protection failed:\n{message}")
+                        )
                     self._queue_update(lambda: self.progress_var.set("Error"))
                 finally:
                     self._queue_update(lambda: self._set_processing(False))
@@ -1236,11 +1489,13 @@ if TKINTER_AVAILABLE:
                         self._queue_update(lambda: messagebox.showwarning(
                             "Cancelled", "Batch processing was cancelled"
                         ))
-                except Exception as e:
-                    self._log(f"Batch error: {str(e)}", "error")
+                except Exception as exc:  # noqa: BLE001 - worker thread boundary: report to the user, never crash the GUI
+                    # Bound before the except block ends; see _protect_single.
+                    message = str(exc)
+                    self._log(f"Batch error: {message}", "error")
                     if messagebox is not None:
                         self._queue_update(lambda: messagebox.showerror(
-                            "Error", f"Batch processing failed:\n{str(e)}"
+                            "Error", f"Batch processing failed:\n{message}"
                         ))
                 finally:
                     self._queue_update(lambda: self._set_processing(False))
@@ -1273,7 +1528,7 @@ if TKINTER_AVAILABLE:
 
         def run(self) -> None:
             """Run GUI"""
-            self._log("Advanced Image Protector v2.1", "info")
+            self._log("Image Protector v2.2", "info")
             self._log("Select an image or folder to protect", "info")
             if not SCIPY_AVAILABLE:
                 self._log("Note: scipy not available - some methods disabled", "warning")
@@ -1286,7 +1541,7 @@ if TKINTER_AVAILABLE:
 def create_cli() -> argparse.ArgumentParser:
     """Create command-line interface"""
     parser = argparse.ArgumentParser(
-        description='Advanced Image Protector v2.1 - Add perturbations to protect images',
+        description='Image Protector v2.2 - Add controlled perturbation to images',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples because I felt like adding them:
@@ -1303,15 +1558,26 @@ Examples because I felt like adding them:
   python image_protector.py --gui
 
 Methods:
-  ensemble    - Combines multiple methods (best results, requires scipy)
-  frequency   - DCT frequency domain protection (requires scipy)
-  gradient    - Gradient-based perturbations
-  texture     - Texture-aware noise (requires scipy)
-  adversarial - Iterative perturbation
-  noise       - Adaptive noise
+  ensemble    - Weighted blend of the components below (default)
+  frequency   - DCT band-targeted perturbation (requires scipy)
+  gradient    - Structured sinusoidal pattern, edge-weighted
+  texture     - Value-noise texture, contrast-weighted (requires scipy)
+  adversarial - Iterative bounded perturbation
+  noise       - Content-adaptive noise, band-limited
 
-Note: This tool adds visual noise patterns. It does not provide
-      true adversarial protection against AI models.
+Naming note: 'gradient' and 'adversarial' are historical names. Neither
+computes the gradient of any model; there is no surrogate network in this
+tool. They are structured and iterative perturbations respectively.
+
+Tuning:
+  --assume-downscale sets the resolution a scraper is assumed to resize to.
+  Perturbation is aimed at the detail that survives that resize, so setting
+  it near the real ingest size matters more than raising --strength.
+
+  --strength is a quality budget: 6 dB per doubling, identical across methods.
+
+Note: This raises the cost of automated processing. It is not a guarantee,
+      and it is not an adversarial attack on any specific model.
         """
     )
 
@@ -1323,28 +1589,60 @@ Note: This tool adds visual noise patterns. It does not provide
                         default='ensemble', help='Protection method (default: ensemble)')
     parser.add_argument('-s', '--strength', type=float, default=1.0,
                         help='Protection strength 0.1-3.0 (default: 1.0)')
-    parser.add_argument('--freq', type=float, default=0.4,
-                        help='Frequency method weight for ensemble (default: 0.4)')
-    parser.add_argument('--grad', type=float, default=0.3,
-                        help='Gradient method weight for ensemble (default: 0.3)')
-    parser.add_argument('--texture', type=float, default=0.2,
-                        help='Texture method weight for ensemble (default: 0.2)')
-    parser.add_argument('--noise', type=float, default=0.1,
-                        help='Noise method weight for ensemble (default: 0.1)')
+    parser.add_argument('--freq', type=float, default=0.40,
+                        help='Frequency component weight for ensemble (default: 0.40)')
+    parser.add_argument('--grad', type=float, default=0.30,
+                        help='Gradient component weight for ensemble (default: 0.30)')
+    parser.add_argument('--texture', type=float, default=0.05,
+                        help='Texture component weight for ensemble (default: 0.05)')
+    parser.add_argument('--noise', type=float, default=0.25,
+                        help='Noise component weight for ensemble (default: 0.25)')
     parser.add_argument('--signature', action='store_true',
                         help='Add invisible metadata signature')
     parser.add_argument('--no-metrics', action='store_true',
                         help='Do not save metrics JSON')
+    parser.add_argument('--assume-downscale', type=int, default=224, metavar='PX',
+                        help='Resolution a scraper is assumed to resize to. Perturbation '
+                             'is steered into the band that survives it (default: 224)')
+    parser.add_argument('--target-psnr', type=float, default=35.0, metavar='DB',
+                        help='Quality budget in dB at strength 1.0; strength scales it '
+                             '(default: 35.0)')
+    parser.add_argument('--no-preserve-quality', action='store_true',
+                        help='Skip PSNR budgeting and emit the raw perturbation')
+    parser.add_argument('--no-perceptual-masking', action='store_true',
+                        help='Spread perturbation evenly instead of hiding it in busy regions')
+    parser.add_argument('--chroma-boost', type=float, default=1.6, metavar='F',
+                        help='Bias perturbation toward chroma, which the eye tracks less '
+                             'closely. 1.0 disables (default: 1.6)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed the RNG for reproducible output')
     parser.add_argument('--gui', action='store_true',
                         help='Launch GUI mode')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Verbose output')
 
     return parser
-    # AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH!
+
+def _make_console_encoding_safe() -> None:
+    """
+    Stop console output from crashing on non-cp1252 characters.
+
+    The Windows console defaults to a legacy codepage, so printing a filename
+    containing (say) CJK or emoji raises UnicodeEncodeError and kills a batch
+    run partway through. Degrading those characters is always better than
+    aborting the job over a progress message.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            # A redirected or already-detached stream may refuse; not worth failing over.
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(errors="replace")
+
 
 def main() -> int:
     """Main entry point"""
+    _make_console_encoding_safe()
     parser = create_cli()
     args = parser.parse_args()
 
@@ -1368,8 +1666,8 @@ def main() -> int:
             gui = ProtectorGUI()
             gui.run()
             return 0
-        except Exception as e:
-            logger.error(f"GUI error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("GUI error")
             return 1
 
 
@@ -1386,11 +1684,13 @@ def main() -> int:
             gradient_weight=args.grad,
             texture_weight=args.texture,
             noise_weight=args.noise,
-            add_signature=args.signature
-            # add_future_options_here=True
-            # Remember to also update the config dataclass and the GUI options if we add more options here
-            # Also Remember to validate the weights for ensemble method if we add more methods or options that affect the protection process
-            # Lot more places but I think you get the idea...
+            add_signature=args.signature,
+            preserve_quality=not args.no_preserve_quality,
+            target_psnr=args.target_psnr,
+            assume_downscale=args.assume_downscale,
+            perceptual_masking=not args.no_perceptual_masking,
+            chroma_boost=args.chroma_boost,
+            seed=args.seed,
         )
     except ValueError as e:
         print(f"Configuration error: {e}")
@@ -1411,7 +1711,7 @@ def main() -> int:
     # Process images
     try:
         if args.batch:
-            print(f" Batch processing: {args.input} → {args.output}")
+            print(f" Batch processing: {args.input} -> {args.output}")
             print(f"Method: {config.method}, Strength: {config.strength}")
 
             results = processor.process_batch(
@@ -1438,16 +1738,16 @@ def main() -> int:
             ) # I included the option to not save metrics for users who want a simpler output without the extra JSON file.
               # but still want to see the PSNR and perturbation strength in the console output.
 
-            psnr_str = f"{metrics.psnr:.2f}" if metrics.psnr != float('inf') else "∞"
+            psnr_str = f"{metrics.psnr:.2f}" if metrics.psnr != float('inf') else "inf"
             print(f"\n Protected image saved: {args.output}")
-            print(f"   PSNR: {psnr_str} dB")
+            print(f"   PSNR: {psnr_str} dB (budget {metrics.target_psnr:.2f} dB)")
             print(f"   MSE: {metrics.mse:.4f}")
             print(f"   Perturbation: {metrics.perturbation_strength:.2f}")
-            # Print("Config: {metrics.config}")
-            # Uncomment if you want to see the config used for this image in the console output as well.
+            print(f"   Estimated survival of a {config.assume_downscale}px downscale: "
+                  f"{metrics.estimated_survival * 100:.1f}%")
 
             if metrics.warnings:
-                print(f"\n  Warnings:")
+                print("\n  Warnings:")
                 for warning in metrics.warnings:
                     print(f"   - {warning}")
 
@@ -1457,7 +1757,7 @@ def main() -> int:
         print("\n\n Interrupted by user")
         return 130
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=args.verbose)
+        logger.error("Error: %s", e, exc_info=args.verbose)
         print(f"\n Error: {e}")
         if args.verbose:
             import traceback

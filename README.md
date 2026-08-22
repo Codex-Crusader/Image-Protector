@@ -40,9 +40,9 @@ AdvancedImageProtector-CLI.exe input.jpg -o protected.jpg
 
 ```bash
 # Clone and install
-git clone https://github.com/Codex-Crusader/image-protector.git
-cd image-protector
-pip install -r requirements/requirements.txt
+git clone https://github.com/Codex-Crusader/Image-Protector.git
+cd Image-Protector
+pip install -r Requirements/requirements.txt
 
 # Launch GUI
 python image_protector.py --gui
@@ -56,19 +56,28 @@ python image_protector.py input.jpg -o protected.jpg
 ## ✨ Features
 
 ### 🎨 Multiple Protection Methods
-- **Ensemble** - Combines multiple techniques for maximum protection
-- **Frequency** - DCT-based frequency domain manipulation (requires SciPy)
-- **Gradient** - FGSM-style adversarial patterns
-- **Texture** - Texture-aware adaptive noise
-- **Noise** - Fast, content-adaptive random noise
-- **Adversarial** - PGD-style iterative perturbations
+- **Ensemble** - Weighted blend of the components below (default)
+- **Frequency** - DCT band-targeted perturbation (requires SciPy)
+- **Gradient** - Structured sinusoidal pattern, edge-weighted
+- **Texture** - Value-noise texture, contrast-weighted (requires SciPy)
+- **Noise** - Content-adaptive noise, band-limited
+- **Adversarial** - Iterative bounded perturbation
+
+> **On the names:** `gradient` and `adversarial` are historical. Neither one
+> computes the gradient of any model, because there is no surrogate network in
+> this tool. They are a structured pattern and an iterative bounded
+> perturbation respectively. A real gradient attack is planned behind an
+> optional torch extra.
 
 ### 🛠️ Powerful Capabilities
 - ✅ **Batch processing** - Protect entire folders at once
-- ✅ **Adjustable strength** - From subtle (0.1) to maximum (3.0+)
+- ✅ **Ingest-aware targeting** - aims perturbation at the detail that survives a scraper's downscale
+- ✅ **Adjustable strength** - a quality budget in dB, 6 dB per doubling, identical across methods
+- ✅ **Perceptual masking** - hides perturbation in busy regions where the eye is least sensitive
 - ✅ **Custom method weights** - Fine-tune ensemble combinations
 - ✅ **Metadata signatures** - Optional invisible watermarking
-- ✅ **Detailed metrics** - PSNR, MSE, perturbation strength tracking
+- ✅ **Detailed metrics** - PSNR, MSE, and estimated survival of a downscale
+- ✅ **Reproducible** - `--seed` for identical output across runs
 - ✅ **Progress tracking** - Real-time status for batch operations
 - ✅ **Cross-platform** - Windows, Linux, macOS
 
@@ -95,8 +104,8 @@ Download directly from [here](https://github.com/Codex-Crusader/Image-Protector/
 
 #### 1. Clone the Repository
 ```bash
-git clone https://github.com/Codex-Crusader/image-protector.git
-cd image-protector
+git clone https://github.com/Codex-Crusader/Image-Protector.git
+cd Image-Protector
 ```
 
 #### 2. Create Virtual Environment (Recommended)
@@ -114,18 +123,18 @@ venv\Scripts\activate
 
 **Minimal installation** (core features):
 ```bash
-pip install -r requirements/requirements.txt
+pip install -r Requirements/requirements.txt
 ```
 
 **Full installation** (all features including frequency/texture methods):
 ```bash
-pip install -r requirements/requirements.txt
+pip install -r Requirements/requirements.txt
 pip install scipy
 ```
 
 **Development installation** (for contributors):
 ```bash
-pip install -r requirements/dev-requirements.txt
+pip install -r Requirements/dev-requirements.txt
 ```
 
 ---
@@ -142,7 +151,7 @@ pip install -r requirements/dev-requirements.txt
 - **tkinter** - Required for GUI mode (usually included with Python)
 
 ### Development Dependencies
-Tools for contributors (see [`requirements/dev-requirements.txt`](Requirements/dev-requirements.txt)):
+Tools for contributors (see [`Requirements/dev-requirements.txt`](Requirements/dev-requirements.txt)):
 - `black` - Code formatting
 - `ruff` - Linting
 - `mypy` - Type checking
@@ -233,14 +242,34 @@ python image_protector.py input.jpg -o output.jpg -v
 | `-b, --batch` | Enable batch processing for directories | `False` | `-b` |
 | `-m, --method` | Protection method (see below) | `ensemble` | `-m gradient` |
 | `-s, --strength` | Protection strength (0.1-5.0) | `1.0` | `-s 2.5` |
-| `--freq` | Ensemble weight for frequency method | `0.4` | `--freq 0.5` |
-| `--grad` | Ensemble weight for gradient method | `0.3` | `--grad 0.4` |
-| `--texture` | Ensemble weight for texture method | `0.2` | `--texture 0.1` |
-| `--noise` | Ensemble weight for noise method | `0.1` | `--noise 0.2` |
+| `--assume-downscale` | Resolution a scraper is assumed to resize to | `224` | `--assume-downscale 112` |
+| `--target-psnr` | Quality budget in dB at strength 1.0 | `35.0` | `--target-psnr 32` |
+| `--no-preserve-quality` | Emit the raw perturbation, skipping the budget | `False` | `--no-preserve-quality` |
+| `--no-perceptual-masking` | Spread perturbation evenly instead of hiding it | `False` | `--no-perceptual-masking` |
+| `--chroma-boost` | Bias perturbation toward chroma (1.0 disables) | `1.6` | `--chroma-boost 2.0` |
+| `--seed` | Seed the RNG for reproducible output | `None` | `--seed 42` |
+| `--freq` | Ensemble weight for frequency component | `0.40` | `--freq 0.5` |
+| `--grad` | Ensemble weight for gradient component | `0.30` | `--grad 0.4` |
+| `--texture` | Ensemble weight for texture component | `0.05` | `--texture 0.1` |
+| `--noise` | Ensemble weight for noise component | `0.25` | `--noise 0.2` |
 | `--signature` | Add invisible metadata signature | `False` | `--signature` |
 | `--no-metrics` | Don't save metrics JSON file | `False` | `--no-metrics` |
 | `--gui` | Launch GUI mode | `False` | `--gui` |
 | `-v, --verbose` | Enable verbose logging | `False` | `-v` |
+
+#### The two settings that matter most
+
+**`--assume-downscale`** is the important one. Scrapers resize before feeding a
+model, and a resize is a low-pass filter, so perturbation above its cutoff is
+averaged away before anything sees it. Set this near the real ingest size
+(224 suits most CLIP-style pipelines) and the perturbation is aimed at detail
+that actually survives. Setting this correctly matters more than raising
+`--strength`.
+
+**`--strength`** is a quality budget, not an amplitude multiplier: 6 dB per
+doubling, so `2.0` is exactly twice the perturbation of `1.0`, and it means the
+same thing for every method. That is what stops the ensemble from being weaker
+than its own components.
 
 ### Protection Methods
 
@@ -305,34 +334,39 @@ For in-depth mathematical explanations, see:
 - 🔄 [Data Flow Diagrams](Docs/variable_flow.md)
 
 #### 🎼 Frequency Method
-Uses Discrete Cosine Transform (DCT) to add noise in the frequency domain:
-- Processes image in 8×8 blocks (like JPEG)
-- Targets high-frequency components
-- Nearly invisible to human eye
-- Disrupts gradient-based ML analysis
+Discrete Cosine Transform (DCT) perturbation, vectorised over 8×8 blocks:
+- Targets the frequency band that **survives** the assumed downscale, rather
+  than the top of the spectrum
+- Never touches DC, so overall brightness is unchanged
+- Note this is the component JPEG re-encoding hurts most, since JPEG quantises
+  exactly these coefficients
 
 #### 🌊 Gradient Method
-Simulates FGSM (Fast Gradient Sign Method) adversarial attacks:
-- Creates interference patterns using sinusoidal functions
-- Edge-aware perturbations (stronger on edges)
-- Confuses feature extractors
+A structured sinusoidal interference pattern. **No model gradient is computed:**
+- Pattern frequency scales with the assumed downscale so it survives resampling
+- Edge-weighted, so it rides on existing detail
+- Historically named after FGSM; the mechanism is not FGSM
 
 #### 🧩 Texture Method
-Adds Perlin-like noise adapted to image content:
-- Analyzes local texture variance
-- Stronger noise in textured regions
-- Preserves smooth areas
+Value noise (bicubic-upsampled white noise) adapted to image content:
+- Feature size tracks the assumed downscale
+- Weighted by local variance, so textured regions carry more
+- Previously the blob scale was large enough that its energy sat almost
+  entirely near DC, which survives a resize but reads as a slow colour cast
 
 #### 🎲 Noise Method
-Fast, adaptive random noise injection:
-- Content-aware noise scaling
-- Balances speed with effectiveness
+Content-adaptive noise, low-pass filtered:
+- Blurred to the smallest feature the assumed downscale can carry, because
+  white noise is over 88% destroyed by a resize to 224px
+- Scaled by local variance
 
 #### 🔄 Adversarial Method
-Iterative PGD-style (Projected Gradient Descent) simulation:
-- 7 iterations with decaying step size
-- Projects perturbations to epsilon ball
-- Heuristic approach (not model-specific)
+Iterative bounded perturbation. **Not a PGD attack:**
+- 7 accumulating steps with decaying size, projected into an epsilon ball
+- Uses a spatially correlated walk, which survives resampling better than the
+  white noise the previous version used
+- Without a model to differentiate, the old seven-step version was
+  statistically equivalent to a single draw of bounded noise
 
 #### 🎭 Ensemble Method
 Weighted combination of all methods:
@@ -452,7 +486,12 @@ However, some metadata may be lost during processing. If preserving all metadata
 - ❌ **Not cryptographically secure** - This is obfuscation, not encryption
 - ❌ **Not model-specific** - Doesn't target particular ML architectures
 - ❌ **Reversible with effort** - Determined attackers with resources can denoise
-- ❌ **No gradient access** - Can't compute true adversarial perturbations without target model
+- ❌ **No gradient access** - Can't compute true adversarial perturbations without a target model
+- ❌ **Not validated against a model** - the tool measures how much perturbation
+  *survives* ingest, which is necessary but not sufficient. Whether that
+  perturbation actually moves a model's output is unmeasured, and needs a
+  model-in-the-loop evaluation harness that does not exist yet. Treat survival
+  numbers as "reaches the model", not "fools the model".
 
 **Practical Limitations:**
 - Some methods require SciPy (optional dependency)
@@ -561,14 +600,14 @@ But Please keep your changes small focused and consistant with the existing code
 ```bash
 # Clone your fork
 git clone https://github.com/YOUR_USERNAME/image-protector.git
-cd image-protector
+cd Image-Protector
 
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dev dependencies
-pip install -r requirements/dev-requirements.txt
+pip install -r Requirements/dev-requirements.txt
 
 # Install pre-commit hooks (optional)
 pre-commit install

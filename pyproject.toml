@@ -4,22 +4,53 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-protector"
-version = "0.1.0"
+version = "2.2.0"
 description = "Image perturbation and obfuscation tool with CLI and GUI"
 readme = "README.md"
 license = { text = "MIT" }
+requires-python = ">=3.9"
 authors = [
-  { name = "Your Name" }
+  { name = "Bhargavaram Krishnapur", email = "bhargavaramkrishnapur@gmail.com" }
+]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics",
 ]
 dependencies = [
-  "numpy",
-  "pillow"
+  "numpy>=1.20.0",
+  "pillow>=9.0.0",
 ]
 
 [project.optional-dependencies]
-full = [
-  "scipy"
-]
+# scipy unlocks the frequency and texture components and the faster filters.
+full = ["scipy>=1.7.0"]
+dev = ["pytest", "ruff", "mypy", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/Codex-Crusader/Image-Protector"
+Issues = "https://github.com/Codex-Crusader/Image-Protector/issues"
 
 [project.scripts]
 image-protector = "image_protector:main"
+
+[tool.setuptools]
+py-modules = ["image_protector"]
+
+# Lint config is pinned here so `ruff check` gives the same answer for everyone
+# instead of depending on whatever ambient config a contributor happens to have.
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "BLE", "DTZ", "G", "C4"]
+ignore = [
+  "E501",    # width is enforced by line-length; not worth churning comments over
+]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
