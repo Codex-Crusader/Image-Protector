@@ -57,11 +57,15 @@ python image_protector.py input.jpg -o protected.jpg
 
 ### 🎨 Multiple Protection Methods
 - **Ensemble** - Weighted blend of the components below (default)
-- **Frequency** - DCT band-targeted perturbation (requires SciPy)
+- **Frequency** - band-pass perturbation in the frequency domain
 - **Gradient** - Structured sinusoidal pattern, edge-weighted
 - **Texture** - Value-noise texture, contrast-weighted (requires SciPy)
 - **Noise** - Content-adaptive noise, band-limited
 - **Adversarial** - Iterative bounded perturbation
+
+> **Only `texture` still needs SciPy.** Everything else is pure NumPy, so the
+> default install gets five of the six methods. Measured pipeline survival for
+> the ensemble is 41.0% without SciPy against 42.9% with it.
 
 > **On the names:** `gradient` and `adversarial` are historical. Neither one
 > computes the gradient of any model, because there is no surrogate network in
@@ -73,7 +77,7 @@ python image_protector.py input.jpg -o protected.jpg
 - ✅ **Batch processing** - Protect entire folders at once
 - ✅ **Ingest-aware targeting** - aims perturbation at the detail that survives a scraper's downscale
 - ✅ **Adjustable strength** - a quality budget in dB, 6 dB per doubling, identical across methods
-- ✅ **Perceptual masking** - hides perturbation in busy regions where the eye is least sensitive
+- ✅ **Perceptual masking** - hides perturbation in busy regions where the eye is least sensitive (measured: +0.018 SSIM at matched PSNR)
 - ✅ **Custom method weights** - Fine-tune ensemble combinations
 - ✅ **Metadata signatures** - Optional invisible watermarking
 - ✅ **Detailed metrics** - PSNR, MSE, and estimated survival of a downscale
@@ -126,7 +130,7 @@ venv\Scripts\activate
 pip install -r Requirements/requirements.txt
 ```
 
-**Full installation** (all features including frequency/texture methods):
+**Full installation** (adds the texture method and faster filtering):
 ```bash
 pip install -r Requirements/requirements.txt
 pip install scipy
@@ -246,7 +250,7 @@ python image_protector.py input.jpg -o output.jpg -v
 | `--target-psnr` | Quality budget in dB at strength 1.0 | `35.0` | `--target-psnr 32` |
 | `--no-preserve-quality` | Emit the raw perturbation, skipping the budget | `False` | `--no-preserve-quality` |
 | `--no-perceptual-masking` | Spread perturbation evenly instead of hiding it | `False` | `--no-perceptual-masking` |
-| `--chroma-boost` | Bias perturbation toward chroma (1.0 disables) | `1.6` | `--chroma-boost 2.0` |
+| `--chroma-boost` | Bias perturbation toward chroma (see note below) | `1.0` (off) | `--chroma-boost 1.6` |
 | `--seed` | Seed the RNG for reproducible output | `None` | `--seed 42` |
 | `--freq` | Ensemble weight for frequency component | `0.40` | `--freq 0.5` |
 | `--grad` | Ensemble weight for gradient component | `0.30` | `--grad 0.4` |
@@ -271,6 +275,21 @@ doubling, so `2.0` is exactly twice the perturbation of `1.0`, and it means the
 same thing for every method. That is what stops the ensemble from being weaker
 than its own components.
 
+> ⚠️ **Behaviour change from v2.1:** because `--strength` is now a budget rather
+> than a per-method multiplier, the same number produces a different result. The
+> v2.1 ensemble at `-s 1.0` gave a perturbation std of ~3.40 (PSNR 37.5); v2.2
+> gives ~4.49 (PSNR 35.1), so roughly 32% more perturbation. If you were happy
+> with v2.1 output at `1.0`, about `0.75` matches it.
+
+**`--chroma-boost` is off by default, and that is a deliberate reversal.** The
+idea was that human vision resolves colour detail less sharply than luminance,
+so leaning the perturbation chromatic should buy amplitude cheaply. Measurement
+disagreed on both counts: scored with CIEDE2000 across five photographs at a
+matched 35 dB budget, mean deltaE rose with the boost (2.99 off, 3.11 at 1.6,
+3.14 at 3.0), meaning *more* visible rather than less. It also lowered pipeline
+survival, because JPEG chroma-subsamples, so energy placed there is discarded
+twice over. The flag remains for experimentation; it is not a recommendation.
+
 ### Protection Methods
 
 | Method | Speed | Visibility | SciPy Required | Best For |
@@ -283,6 +302,46 @@ than its own components.
 | `noise` | **Fastest** | Medium | No | Rapid batch processing |
 
 *\*Some features require SciPy but will gracefully degrade without it*
+
+---
+
+## 📏 Measured Results
+
+Measured on five real photographs, ensemble at `--strength 1.0`, matched 35 dB
+quality budget. "Survival" is the share of perturbation reaching a model through
+a realistic ingest (JPEG q75 then resize to 224px), using a projection estimator
+so each side's own JPEG quantisation noise does not inflate the number.
+
+| | v2.1 | v2.2 |
+|---|---|---|
+| Perturbation surviving ingest | 25.3% | **56.4%** |
+| Ensemble vs its strongest component | 0.43x (weaker) | **1.00x** |
+| SSIM | - | 0.919 |
+| CIEDE2000 | - | 2.99 |
+
+Per-component survival through the same pipeline:
+
+| component | v2.1 | v2.2 |
+|---|---|---|
+| frequency | 4.1% | 20.4% |
+| noise | 16.4% | 42.7% |
+| adversarial | 16.7% | 68.3% |
+| gradient | 81.7% | 82.3% |
+| texture | 98.4% | 93.6% |
+
+### What these numbers do and do not say
+
+Survival measures whether the perturbation **reaches** a model, which is
+necessary but not sufficient. It does not measure whether the model's output
+actually changes. Note `texture` scores highest while placing ~1% of its energy
+above the downscale cutoff, meaning it is close to a flat colour cast, which is
+precisely the band models are most invariant to. High survival and low
+effectiveness are perfectly compatible.
+
+Answering the effectiveness question needs a model-in-the-loop harness
+(embedding distance under an open CLIP, before and after each transform). That
+does not exist here yet, so treat every number above as "reaches the model",
+never as "fools the model".
 
 ---
 
@@ -334,12 +393,16 @@ For in-depth mathematical explanations, see:
 - 🔄 [Data Flow Diagrams](Docs/variable_flow.md)
 
 #### 🎼 Frequency Method
-Discrete Cosine Transform (DCT) perturbation, vectorised over 8×8 blocks:
+A radial band-pass built with a global FFT:
 - Targets the frequency band that **survives** the assumed downscale, rather
   than the top of the spectrum
 - Never touches DC, so overall brightness is unchanged
-- Note this is the component JPEG re-encoding hurts most, since JPEG quantises
-  exactly these coefficients
+- Was per-block 8×8 DCT in imitation of JPEG. Blocks were the wrong tool:
+  independent noise per block does not match at the seams, so the perturbation
+  was discontinuous at every boundary (measured at 5.3× the interior step on a
+  1760px photo, and enlarging blocks made each seam worse, not better). A global
+  FFT has no block grid to leave seams at.
+- No longer needs SciPy
 
 #### 🌊 Gradient Method
 A structured sinusoidal interference pattern. **No model gradient is computed:**
@@ -452,7 +515,7 @@ I regret nothing (maybe a little). But it works great!
 
 The `frequency` method uses **Discrete Cosine Transform (DCT)** - the same math behind JPEG compression. The `texture` method uses advanced **convolution operations** for local variance analysis. These require SciPy's signal processing library.
 
-**Good news:** The tool gracefully degrades without SciPy. Ensemble mode will just skip frequency/texture methods if SciPy isn't installed.
+**Good news:** The tool degrades gracefully without SciPy, and as of v2.2 only the `texture` method needs it. Measured ensemble survival is 41.0% without SciPy against 42.9% with it.
 
 ### Q. How does this compare to Fawkes/Nightshade?
 

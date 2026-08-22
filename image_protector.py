@@ -27,8 +27,9 @@ Three other mechanics follow from the same idea:
     the ensemble can no longer come out weaker than its own components.
   - perceptual masking hides perturbation in busy regions, where the eye is
     least able to see it.
-  - chroma weighting leans the perturbation toward colour, which human vision
-    resolves far less sharply than luminance.
+  - chroma weighting (available, off by default) leans the perturbation toward
+    colour. The idea was that human vision resolves colour detail less sharply,
+    but CIEDE2000 says it makes the result more visible, so it stays off.
 
 Author: Bhargavaram Krishnapur
 License: MIT
@@ -74,19 +75,19 @@ if TYPE_CHECKING:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
-    from scipy import fftpack, ndimage
+    from scipy import ndimage
 
     SCIPY_AVAILABLE = True
     TKINTER_AVAILABLE = True
 else:
     try:
-        from scipy import fftpack, ndimage
+        from scipy import ndimage
 
         SCIPY_AVAILABLE = True
     except ImportError:
-        fftpack = ndimage = None
+        ndimage = None
         SCIPY_AVAILABLE = False
-        logger.warning("scipy not available - frequency and texture methods disabled")
+        logger.warning("scipy not available - the texture component will be skipped")
 
     try:
         import queue
@@ -131,9 +132,17 @@ class ProtectionConfig:
     # Hide perturbation in high-contrast/textured regions where the eye is least
     # sensitive, rather than spreading it uniformly.
     perceptual_masking: bool = True
-    # Human vision is far less sensitive to chroma than luma, so the same PSNR
-    # budget buys a larger perturbation if it leans chromatic. 1.0 disables.
-    chroma_boost: float = 1.6
+    # Rotate perturbation energy toward chroma, on the theory that human vision
+    # resolves colour detail less sharply than luminance.
+    #
+    # OFF BY DEFAULT because measurement did not support it. Scored with
+    # CIEDE2000 (which models colour-difference perception, unlike PSNR) across
+    # five photographs at a matched 35 dB budget, mean deltaE rose monotonically
+    # with the boost: 2.99 at 1.0, 3.11 at 1.6, 3.14 at 3.0. Lower is better, so
+    # the perturbation became *more* perceptible, not less. Kept as an option
+    # rather than deleted, since a chroma-subsampling ingest may value it
+    # differently, but it should not be on until something measures it winning.
+    chroma_boost: float = 1.0
     # Set for reproducible output (needed to compare runs in evaluation).
     seed: int | None = None
 
@@ -260,8 +269,6 @@ class AdvancedProtector:
             if self.config.method == 'ensemble':
                 delta = self._ensemble_delta(img_f, warnings_list)
             elif self.config.method == 'frequency':
-                if not SCIPY_AVAILABLE:
-                    raise RuntimeError("scipy required for frequency method")
                 delta = self._frequency_delta(img_f)
             elif self.config.method == 'gradient':
                 delta = self._gradient_delta(img_f)
@@ -335,9 +342,9 @@ class AdvancedProtector:
         for name, weight, fn in components:
             if weight <= 0:
                 continue
-            if name == 'frequency' and not SCIPY_AVAILABLE:
-                logger.warning("Skipping frequency component (scipy unavailable)")
-                warnings_list.append("Ensemble ran without the frequency component (scipy unavailable)")
+            if name == 'texture' and not SCIPY_AVAILABLE:
+                logger.warning("Skipping texture component (scipy unavailable)")
+                warnings_list.append("Ensemble ran without the texture component (scipy unavailable)")
                 continue
             try:
                 part = fn(img)
@@ -357,75 +364,58 @@ class AdvancedProtector:
 
     def _survivable_band(self, extent: int) -> tuple[float, float]:
         """
-        DCT frequency band (in 8x8 block index units) that survives the assumed
-        downscale.
+        Normalised radial frequency band that survives the assumed downscale,
+        where 1.0 is Nyquist of the source image.
 
-        A downscale to S pixels across an extent of N acts as a low-pass filter
-        with a cutoff at S/N of the original Nyquist. In an 8x8 DCT block, basis
-        index u carries u/16 cycles per pixel and Nyquist sits at u = 8, so the
-        cutoff lands at u = 8 * S/N. Anything injected above that is averaged
-        away by the resample before a model ever sees it, which is exactly what
-        the previous 'freq > 4' rule did on any image wider than about 900px.
+        A downscale to S pixels across an extent of N is a low-pass filter with
+        its cutoff at S/N of the original Nyquist. Anything injected above that
+        is averaged away by the resample before a model ever sees it, which is
+        what the original 'diagonal index > 4' rule did on any image wider than
+        about 900px: 99.4% of that method's energy sat above the cutoff and
+        about 4% of it survived a realistic ingest.
 
-        We aim just under the cutoff: high enough to stay visually subtle, low
-        enough to survive.
+        We aim just under the cutoff: low enough to survive the resample, high
+        enough to carry structure rather than reading as a slow colour cast.
         """
         ratio = min(1.0, self.config.assume_downscale / max(1, extent))
-        cutoff = 8.0 * ratio
-        low = max(1.0, cutoff * 0.35)
-        high = max(low + 0.5, cutoff * 0.95)
+        low = ratio * 0.30
+        high = ratio * 0.95
         return low, high
 
     def _frequency_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Band-targeted DCT domain perturbation, vectorised over blocks.
+        Band-pass perturbation built in the global frequency domain.
 
-        Two changes from the original: the target band now tracks the assumed
-        downscale instead of always hitting the top of the spectrum, and the
-        whole thing runs as array ops rather than a Python loop per 8x8 block
-        with a 64-iteration mask rebuild inside it.
+        This was originally per-block DCT on an 8x8 grid, in imitation of JPEG.
+        Blocks are the wrong tool here: independent noise per block does not
+        match at the seams, so the perturbation is discontinuous at every block
+        boundary. Measured on a 1760px photo, the step across boundaries ran
+        5.3x the interior step at 8x8, and growing the block to give the band
+        more room made each seam worse rather than better (8.9x at 32x32).
+
+        A global FFT expresses the same intent, place energy in one radial
+        band, with no block grid to leave seams at, and it removes the block
+        size question entirely.
         """
-        if not SCIPY_AVAILABLE or fftpack is None:
-            raise RuntimeError("scipy required for frequency protection")
-
         h, w, c = img.shape
-        block_size = 8
-
-        # Pad up to a whole number of blocks, then trim back at the end.
-        pad_h = (-h) % block_size
-        pad_w = (-w) % block_size
-        padded = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect') if (pad_h or pad_w) else img
-        ph, pw = padded.shape[:2]
-        nby, nbx = ph // block_size, pw // block_size
-
-        # Radial band mask, built once rather than per block.
         low, high = self._survivable_band(max(h, w))
-        u = np.arange(block_size)
-        radial = np.hypot(u[:, None], u[None, :])
-        centre = (low + high) / 2.0
-        width = max(1e-3, (high - low) / 2.0)
-        mask = np.exp(-0.5 * ((radial - centre) / width) ** 2).astype(np.float32)
-        mask[0, 0] = 0.0  # never touch DC, it shifts overall brightness
-        if mask.max() > 1e-6:
-            mask /= mask.max()
 
-        logger.debug("DCT band for %dpx -> %dpx: u in [%.2f, %.2f]",
+        # Radial frequency of every FFT bin, normalised so 1.0 is Nyquist.
+        fy = np.fft.fftfreq(h)[:, None]
+        fx = np.fft.fftfreq(w)[None, :]
+        radius = np.hypot(fy, fx) * 2.0
+
+        centre = (low + high) / 2.0
+        width = max(1e-4, (high - low) / 2.0)
+        band = np.exp(-0.5 * ((radius - centre) / width) ** 2)
+        band[0, 0] = 0.0  # leave DC alone; it would shift overall brightness
+
+        logger.debug("FFT band for %dpx -> %dpx: r in [%.4f, %.4f] of Nyquist",
                      max(h, w), self.config.assume_downscale, low, high)
 
-        # (ph, pw, c) -> (c, nby, nbx, 8, 8)
-        blocks = (padded.reshape(nby, block_size, nbx, block_size, c)
-                        .transpose(4, 0, 2, 1, 3)
-                        .astype(np.float32))
-
-        dct = fftpack.dct(fftpack.dct(blocks, axis=-1, norm='ortho'), axis=-2, norm='ortho')
-        noise = self.rng.standard_normal(dct.shape).astype(np.float32)
-        dct_perturbed = dct + noise * mask * 15.0
-        out = fftpack.idct(fftpack.idct(dct_perturbed, axis=-2, norm='ortho'), axis=-1, norm='ortho')
-
-        restored = (out.transpose(1, 3, 2, 4, 0)
-                       .reshape(ph, pw, c))
-
-        return (restored[:h, :w] - img).astype(np.float32)
+        noise = self.rng.standard_normal((h, w, c))
+        spectrum = np.fft.fft2(noise, axes=(0, 1)) * band[:, :, None]
+        return np.real(np.fft.ifft2(spectrum, axes=(0, 1))).astype(np.float32)
 
     def _gradient_delta(self, img: np.ndarray) -> np.ndarray:
         """
@@ -518,11 +508,13 @@ class AdvancedProtector:
 
     def _noise_delta(self, img: np.ndarray) -> np.ndarray:
         """
-        Content-adaptive noise, low-pass filtered into the surviving band.
+        Content-adaptive noise, band-limited into the surviving band.
 
-        White noise is over 88% destroyed by a downscale to 224. Blurring it to
-        the feature size that survives keeps the adaptive character while
-        putting the energy somewhere it can reach a model.
+        White noise is over 88% destroyed by a downscale to 224, so it has to be
+        band-limited to reach a model at all. Both branches below do that; only
+        the filter differs. Leaving the no-scipy branch unfiltered dropped this
+        method's measured pipeline survival to 7.4%, against 42.7% filtered, and
+        scipy is optional, so that branch is the default install.
         """
         h, w, c = img.shape
 
@@ -533,12 +525,19 @@ class AdvancedProtector:
         else:
             noise_scale = np.ones((h, w), dtype=np.float32)
 
-        raw = self.rng.standard_normal((h, w, c)).astype(np.float32)
-
-        # Low-pass to the smallest feature the assumed downscale can carry.
+        # Feature size the assumed downscale can still carry.
         sigma = max(0.5, max(h, w) / max(1.0, 2.0 * self.config.assume_downscale))
+
         if SCIPY_AVAILABLE and ndimage is not None:
+            raw = self.rng.standard_normal((h, w, c)).astype(np.float32)
             raw = ndimage.gaussian_filter(raw, sigma=(sigma, sigma, 0))
+        else:
+            # No scipy: band-limit by generating coarse and upsampling through
+            # PIL's bicubic instead of blurring a full-resolution white field.
+            scale = max(2, round(sigma * 2.0))
+            raw = np.stack(
+                [self._generate_value_noise(h, w, scale) for _ in range(c)], axis=2
+            ).astype(np.float32)
 
         return raw * noise_scale[:, :, None]
 
@@ -1121,9 +1120,9 @@ if TKINTER_AVAILABLE:
             ttk.Label(config_frame, text="Method:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
             self.method_var = tk.StringVar(value='ensemble')
 
-            methods = ['ensemble', 'gradient', 'noise', 'adversarial'] # Methods that don't require scipy are always available
+            # Only 'texture' needs scipy now; the rest are pure numpy.
+            methods = ['ensemble', 'frequency', 'gradient', 'noise', 'adversarial']
             if SCIPY_AVAILABLE:
-                methods.insert(1, 'frequency')
                 methods.insert(3, 'texture')
 
             method_combo = ttk.Combobox(config_frame, textvariable=self.method_var,
@@ -1531,7 +1530,7 @@ if TKINTER_AVAILABLE:
             self._log("Image Protector v2.2", "info")
             self._log("Select an image or folder to protect", "info")
             if not SCIPY_AVAILABLE:
-                self._log("Note: scipy not available - some methods disabled", "warning")
+                self._log("Note: scipy not installed - the texture method is unavailable", "warning")
             self.root.mainloop()
             # I'm Tired Boss
 
@@ -1611,9 +1610,10 @@ Note: This raises the cost of automated processing. It is not a guarantee,
                         help='Skip PSNR budgeting and emit the raw perturbation')
     parser.add_argument('--no-perceptual-masking', action='store_true',
                         help='Spread perturbation evenly instead of hiding it in busy regions')
-    parser.add_argument('--chroma-boost', type=float, default=1.6, metavar='F',
-                        help='Bias perturbation toward chroma, which the eye tracks less '
-                             'closely. 1.0 disables (default: 1.6)')
+    parser.add_argument('--chroma-boost', type=float, default=1.0, metavar='F',
+                        help='Bias perturbation toward chroma. Off by default: measured '
+                             'with CIEDE2000 it made the perturbation more visible, not '
+                             'less (default: 1.0, disabled)')
     parser.add_argument('--seed', type=int, default=None,
                         help='Seed the RNG for reproducible output')
     parser.add_argument('--gui', action='store_true',
@@ -1696,15 +1696,14 @@ def main() -> int:
         print(f"Configuration error: {e}")
         return 1
 
-    # Check scipy for methods that need it
-    # Checks and checks and more checks....
-    if args.method in ('frequency', 'texture') and not SCIPY_AVAILABLE:
-        print(f" Error: Method '{args.method}' requires scipy")
+    # Only the texture component still needs scipy.
+    if args.method == 'texture' and not SCIPY_AVAILABLE:
+        print(" Error: Method 'texture' requires scipy")
         print("Install: pip install scipy")
         return 1
 
     if args.method == 'ensemble' and not SCIPY_AVAILABLE:
-        print("  Warning: scipy not available, ensemble will use limited methods")
+        print("  Note: scipy not installed, the texture component will be skipped")
 
     processor = ImageProcessor(config)
 

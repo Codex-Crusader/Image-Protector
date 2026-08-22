@@ -5,7 +5,8 @@ numpy>=1.20.0
 Pillow>=9.0.0
 
 # NOTE: scipy is NOT listed here on purpose. It is optional and unlocks the
-# frequency and texture components plus the faster filters. Install it with:
+# texture component and the faster filters. Everything else is pure NumPy.
+# Install it with:
 #   pip install -r Requirements/requirements.txt
 #   pip install scipy
 # or in one step:

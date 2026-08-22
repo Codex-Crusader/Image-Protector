@@ -23,11 +23,11 @@ from image_protector import (
     ProtectionConfig,
 )
 
-ALL_METHODS = ['ensemble', 'gradient', 'adversarial', 'noise']
+ALL_METHODS = ['ensemble', 'frequency', 'gradient', 'adversarial', 'noise']
 if SCIPY_AVAILABLE:
-    ALL_METHODS += ['frequency', 'texture']
+    ALL_METHODS += ['texture']
 
-COMPONENTS = ['gradient', 'noise'] + (['frequency', 'texture'] if SCIPY_AVAILABLE else [])
+COMPONENTS = ['frequency', 'gradient', 'noise'] + (['texture'] if SCIPY_AVAILABLE else [])
 
 
 @pytest.fixture
@@ -107,7 +107,6 @@ def test_constant_images_do_not_crash(fill):
 
 # ------------------------------------------------- the ensemble weakness bug
 
-@pytest.mark.skipif(not SCIPY_AVAILABLE, reason="needs the full component set")
 def test_ensemble_is_not_weaker_than_its_components(photo):
     """
     Regression: weights summing to 1 over independent zero-mean fields average
@@ -164,7 +163,6 @@ def _energy_above(delta: np.ndarray, cutoff_px: int) -> float:
     return float(spectrum[~keep].sum() / spectrum.sum())
 
 
-@pytest.mark.skipif(not SCIPY_AVAILABLE, reason="frequency needs scipy")
 def test_lower_assume_downscale_moves_energy_below_the_cutoff(photo):
     """
     The whole point of assume_downscale: aiming at a smaller ingest size must
@@ -180,7 +178,6 @@ def test_lower_assume_downscale_moves_energy_below_the_cutoff(photo):
     assert a < r, f"aiming at {ref}px did not lower energy above it ({a:.3f} vs {r:.3f})"
 
 
-@pytest.mark.skipif(not SCIPY_AVAILABLE, reason="frequency needs scipy")
 def test_perturbation_survives_a_downscale(photo):
     """Regression: the old frequency method lost ~90% of its energy to a resize."""
     out, _ = protect(photo, method='frequency', assume_downscale=224)
@@ -295,3 +292,49 @@ def test_unsupported_extension_is_rejected(tmp_path, photo):
         ImageProcessor(ProtectionConfig(seed=7)).process_single(
             str(src), str(tmp_path / "out.png")
         )
+
+
+# ------------------------------------------------------- artifact regressions
+
+@pytest.mark.parametrize("extent", [512, 1024, 1760])
+def test_frequency_leaves_no_block_seams(extent):
+    """
+    Regression: the perturbation was built per 8x8 DCT block, and independent
+    noise per block does not match at the seams. On a 1760px photo the step
+    across block boundaries ran 5.3x the interior step, and enlarging blocks to
+    give the band more room made each seam worse (8.9x at 32x32). A global FFT
+    band-pass has no block grid to leave seams at.
+    """
+    rng = np.random.default_rng(2)
+    x = np.arange(extent, dtype=np.float64)[None, :]
+    plane = 128 + 40 * np.sin(x / 25.0) + rng.normal(0, 8, (extent, extent))
+    img = np.repeat(np.clip(plane, 0, 255)[:, :, None], 3, axis=2).astype(np.uint8)
+
+    out, _ = protect(img, method='frequency', strength=2.0)
+    delta = out.astype(np.float64) - img
+
+    steps = np.abs(np.diff(delta[:, :, 0], axis=1))
+    cols = np.arange(steps.shape[1])
+    for block in (8, 16, 32):
+        on = steps[:, (cols + 1) % block == 0].mean()
+        off = steps[:, (cols + 1) % block != 0].mean()
+        assert on / off < 1.25, f"{extent}px: {block}px grid seams visible ({on / off:.2f}x)"
+
+
+def test_console_output_is_ascii_only():
+    """
+    Regression: batch mode printed U+2192, which the Windows console's cp1252
+    codepage cannot encode, so it raised UnicodeEncodeError before processing a
+    single file. Windows .exe builds are a shipped artifact, so keep console
+    strings ASCII.
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parent.parent / "image_protector.py").read_text(encoding="utf-8")
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
+            for piece in ast.walk(node):
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                    offenders += [(node.lineno, ch) for ch in piece.value if ord(ch) > 127]
+    assert not offenders, f"non-ASCII in print(): {offenders}"
