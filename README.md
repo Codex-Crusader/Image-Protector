@@ -7,6 +7,8 @@
 
 **Protect your images from unauthorized AI training and automated scraping.**
 
+> **Related post:** [A hardened browser for Windows: fail-closed startup and honest security claims](https://codex-crusader.github.io/writing/browser-hardening/)
+
 Don't like AI greasing their grubby hands over your images? Want to make it harder for bots, scrapers, or basic ML models to analyze or steal your images, while keeping them visually usable for humans? **Image Protector** applies controlled perturbations to make your images harder to scrape, analyze, or use for automated processing-while remaining perfectly viewable.
 
 > **Perfect for:** Artists, photographers, content creators, and anyone who wants to protect their visual work from unauthorized use.
